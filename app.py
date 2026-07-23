@@ -29,7 +29,6 @@ MISSING_OPTS  = [
 # Core helpers
 # ─────────────────────────────────────────────────────────────────────────────
 def default_counts(n, props=None):
-    """Round n × props to ints; absorb rounding error in the largest bucket."""
     if props is None:
         props = DEFAULT_PROPS
     counts = [int(round(n * p)) for p in props]
@@ -41,7 +40,6 @@ def default_counts(n, props=None):
 
 
 def get_adjusted_props(counts_6, mode):
-    """Redistribute missing count into 5 active buckets; return 5 normed props."""
     c    = [float(x) for x in counts_6[:5]]
     miss = float(counts_6[5])
     if   mode == "Redistribute evenly across buckets": c = [x + miss / 5 for x in c]
@@ -84,7 +82,6 @@ def run_one_simulation(
             p_inf    = 1.0 - (1.0 - p_per) ** partners
             inf_arr[mask] = rng.random(n) < p_inf
 
-    # Per-bucket tallies
     vax_bi = np.array([np.sum(vax_inf & (vax_b == k)) for k in range(n_b)])
     pbo_bi = np.array([np.sum(pbo_inf & (pbo_b == k)) for k in range(n_b)])
     vax_bn = np.bincount(vax_b, minlength=n_b)
@@ -94,11 +91,11 @@ def run_one_simulation(
 
 
 def bar_with_iqr(ax, x_pos, medians, q25, q75, color, label, width=0.35):
-    """Grouped bar with IQR error bars."""
+    """Grouped bar with IQR error bars; clips error to ≥ 0 for robustness."""
     ax.bar(x_pos, medians, width, color=color, alpha=0.85, label=label)
     ax.errorbar(
         x_pos, medians,
-        yerr=[medians - q25, q75 - medians],
+        yerr=[np.clip(medians - q25, 0, None), np.clip(q75 - medians, 0, None)],
         fmt="none", color=color, capsize=3, lw=1.2, alpha=0.9,
     )
 
@@ -160,9 +157,7 @@ def dist_panel(prefix, title, n_target, miss_key):
             st.session_state[f"{prefix}_{i}"] = c
         st.rerun()
 
-    st.caption(
-        f"Target: **{n_target:,}** · step ±1 or type · all 6 must sum to target"
-    )
+    st.caption(f"Target: **{n_target:,}** · step ±1 or type · all 6 must sum to target")
 
     cols   = st.columns(6)
     counts = [
@@ -194,18 +189,14 @@ def dist_panel(prefix, title, n_target, miss_key):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Partner count distribution panels
+# Distribution panels
 # ─────────────────────────────────────────────────────────────────────────────
 st.header("Partner Count Distributions")
 left, right = st.columns(2)
 with left:
-    vax_counts, vax_miss, vax_ok = dist_panel(
-        "vax", "💉 Vaccinated", N_vax, "miss_vax"
-    )
+    vax_counts, vax_miss, vax_ok = dist_panel("vax", "💉 Vaccinated", N_vax, "miss_vax")
 with right:
-    pbo_counts, pbo_miss, pbo_ok = dist_panel(
-        "pbo", "🧪 Placebo / Unvaccinated", N_placebo, "miss_pbo"
-    )
+    pbo_counts, pbo_miss, pbo_ok = dist_panel("pbo", "🧪 Placebo / Unvaccinated", N_placebo, "miss_pbo")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -232,7 +223,6 @@ with st.expander("📌 Model Assumptions"):
 # Run simulation
 # ─────────────────────────────────────────────────────────────────────────────
 if run_btn:
-
     if not vax_ok or not pbo_ok:
         if not vax_ok: st.error("❌ Vaccinated group counts do not sum to N_vax")
         if not pbo_ok: st.error("❌ Placebo group counts do not sum to N_placebo")
@@ -242,10 +232,9 @@ if run_btn:
     pbo_props = get_adjusted_props(pbo_counts, pbo_miss)
 
     rng = np.random.default_rng(seed)
-
-    results                          = []
-    vax_bi_all, pbo_bi_all           = [], []
-    vax_bn_all, pbo_bn_all           = [], []
+    results = []
+    vax_bi_all, pbo_bi_all = [], []
+    vax_bn_all, pbo_bn_all = [], []
 
     prog = st.progress(0, text="Running simulations…")
     for i in range(n_runs):
@@ -268,18 +257,17 @@ if run_btn:
     prog.empty()
     df = pd.DataFrame(results)
 
-    # Bucket arrays: shape (n_runs, 5)
     vax_bi = np.array(vax_bi_all)
     pbo_bi = np.array(pbo_bi_all)
     vax_bn = np.array(vax_bn_all)
     pbo_bn = np.array(pbo_bn_all)
 
-    # Attack rate per bucket per run
+    # Cumulative incidence per bucket (proportion of that bucket's people infected)
     with np.errstate(divide="ignore", invalid="ignore"):
-        vax_ar = np.where(vax_bn > 0, vax_bi / vax_bn, np.nan)
-        pbo_ar = np.where(pbo_bn > 0, pbo_bi / pbo_bn, np.nan)
+        vax_ci_bucket = np.where(vax_bn > 0, vax_bi / vax_bn, np.nan)
+        pbo_ci_bucket = np.where(pbo_bn > 0, pbo_bi / pbo_bn, np.nan)
 
-    # Share of infections per bucket per run
+    # Share of all infections coming from each bucket
     with np.errstate(divide="ignore", invalid="ignore"):
         vax_tot = vax_bi.sum(axis=1, keepdims=True)
         pbo_tot = pbo_bi.sum(axis=1, keepdims=True)
@@ -302,18 +290,15 @@ if run_btn:
 
     m1.metric("Median CI — vaccinated", f"{df.ci_v.median():.3f}")
     m1.caption(iqr_str(df.ci_v))
-
     m2.metric("Median CI — placebo",    f"{df.ci_p.median():.3f}")
     m2.caption(iqr_str(df.ci_p))
-
     m3.metric("Median CIR",             f"{df.cir.median():.3f}")
     m3.caption(iqr_str(df.cir))
-
     ve_lo, ve_hi = df.ve.quantile(0.025), df.ve.quantile(0.975)
     m4.metric("Median VE (1 − CIR)",    f"{df.ve.median():.3f}")
     m4.caption(f"95% sim. interval: [{ve_lo:.3f}, {ve_hi:.3f}]")
 
-    # ── Row 1: VE / CI / CIR distributions ────────────────────────────────────
+    # ── Figure 1: Simulation outcome distributions ─────────────────────────────
     st.subheader("Simulation Outcome Distributions")
     fig1, axes1 = plt.subplots(1, 3, figsize=(15, 4))
 
@@ -339,7 +324,7 @@ if run_btn:
     ax.axvline(df.ci_p.median(), color="tomato",    ls="--", lw=1.5,
                label=f"Pbo median {df.ci_p.median():.3f}")
     ax.set_title("Cumulative Incidence")
-    ax.set_xlabel("CI"); ax.set_ylabel("Count")
+    ax.set_xlabel("Proportion Infected"); ax.set_ylabel("Count")
     ax.legend(fontsize=8)
 
     ax = axes1[2]
@@ -357,25 +342,23 @@ if run_btn:
     st.pyplot(fig1)
     plt.close(fig1)
 
-    # ── Row 2: Infections by bucket ────────────────────────────────────────────
+    # ── Figure 2: Infections by bucket ─────────────────────────────────────────
     st.subheader("Infections by Partner Count Bucket")
-    st.caption("All panels show medians across simulation runs; error bars = IQR (25th–75th percentile).")
+    st.caption("Medians across simulation runs; error bars = IQR (25th–75th percentile).")
 
     fig2, axes2 = plt.subplots(1, 3, figsize=(18, 5))
     x = np.arange(5)
     w = 0.35
 
-    # Panel A — absolute infections ──────────────────────────────────────────
+    # Panel A: absolute infections
     ax = axes2[0]
     bar_with_iqr(
-        ax, x - w / 2,
-        np.median(vax_bi, 0),
+        ax, x - w/2, np.median(vax_bi, 0),
         np.quantile(vax_bi, 0.25, 0), np.quantile(vax_bi, 0.75, 0),
         "steelblue", "Vaccinated",
     )
     bar_with_iqr(
-        ax, x + w / 2,
-        np.median(pbo_bi, 0),
+        ax, x + w/2, np.median(pbo_bi, 0),
         np.quantile(pbo_bi, 0.25, 0), np.quantile(pbo_bi, 0.75, 0),
         "tomato", "Placebo",
     )
@@ -384,50 +367,104 @@ if run_btn:
     ax.set_title("Median Infections per Bucket")
     ax.legend()
 
-    # Panel B — attack rate ───────────────────────────────────────────────────
+    # Panel B: cumulative incidence per bucket (renamed from attack rate)
     ax = axes2[1]
     bar_with_iqr(
-        ax, x - w / 2,
-        np.nanmedian(vax_ar, 0),
-        np.nanquantile(vax_ar, 0.25, 0), np.nanquantile(vax_ar, 0.75, 0),
+        ax, x - w/2, np.nanmedian(vax_ci_bucket, 0),
+        np.nanquantile(vax_ci_bucket, 0.25, 0), np.nanquantile(vax_ci_bucket, 0.75, 0),
         "steelblue", "Vaccinated",
     )
     bar_with_iqr(
-        ax, x + w / 2,
-        np.nanmedian(pbo_ar, 0),
-        np.nanquantile(pbo_ar, 0.25, 0), np.nanquantile(pbo_ar, 0.75, 0),
+        ax, x + w/2, np.nanmedian(pbo_ci_bucket, 0),
+        np.nanquantile(pbo_ci_bucket, 0.25, 0), np.nanquantile(pbo_ci_bucket, 0.75, 0),
         "tomato", "Placebo",
     )
     ax.set_xticks(x); ax.set_xticklabels(ACTIVE_LABELS)
-    ax.set_xlabel("Partner Count Bucket"); ax.set_ylabel("Attack Rate")
-    ax.set_title("Median Attack Rate per Bucket")
+    ax.set_xlabel("Partner Count Bucket"); ax.set_ylabel("Proportion Infected")
+    ax.set_title("Median Cumulative Incidence per Bucket")
     ax.legend()
 
-    # Panel C — share of all infections ──────────────────────────────────────
+    # Panel C: share of total infections
     ax = axes2[2]
     bar_with_iqr(
-        ax, x - w / 2,
-        np.nanmedian(vax_pct, 0),
+        ax, x - w/2, np.nanmedian(vax_pct, 0),
         np.nanquantile(vax_pct, 0.25, 0), np.nanquantile(vax_pct, 0.75, 0),
         "steelblue", "Vaccinated",
     )
     bar_with_iqr(
-        ax, x + w / 2,
-        np.nanmedian(pbo_pct, 0),
+        ax, x + w/2, np.nanmedian(pbo_pct, 0),
         np.nanquantile(pbo_pct, 0.25, 0), np.nanquantile(pbo_pct, 0.75, 0),
         "tomato", "Placebo",
     )
     ax.set_xticks(x); ax.set_xticklabels(ACTIVE_LABELS)
     ax.set_xlabel("Partner Count Bucket"); ax.set_ylabel("Share of All Infections")
     ax.set_title("Share of Total Infections per Bucket")
-    ax.yaxis.set_major_formatter(
-        plt.FuncFormatter(lambda y, _: f"{y:.0%}")
-    )
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: f"{y:.0%}"))
     ax.legend()
 
     plt.tight_layout()
     st.pyplot(fig2)
     plt.close(fig2)
+
+    # ── Figure 3: Within >50 bucket detail ─────────────────────────────────────
+    st.subheader(">50 Partner Bucket: Within-Bucket Detail")
+    st.caption(
+        "**Left:** distribution of total partners accumulated across all 4 periods for a "
+        f"person in the >50 bucket (Discrete Uniform {upper_lo}–{upper_hi} per period; "
+        "analytical via 200k draws from sum of 4 independent uniforms). "
+        "**Right:** theoretical cumulative incidence as a function of those total partners "
+        "— because P(infected) = 1 − (1 − p_per)^total_partners, the relationship is exact "
+        "and does not require simulation. Dashed line marks the median total partner count."
+    )
+
+    fig3, axes3 = plt.subplots(1, 2, figsize=(12, 4))
+
+    # Left: distribution of total partners (sum of 4 uniforms)
+    rng_vis  = np.random.default_rng(0)          # fixed seed → plot is deterministic
+    n_vis    = 200_000
+    span_b4  = upper_hi - upper_lo + 1
+    tot_part = np.sum(
+        upper_lo + np.floor(rng_vis.random((n_vis, N_PERIODS)) * span_b4).astype(int),
+        axis=1,
+    )
+    med_tot = int(np.median(tot_part))
+
+    ax = axes3[0]
+    n_bins = min(100, span_b4 * N_PERIODS)
+    ax.hist(tot_part, bins=n_bins, color="mediumpurple",
+            edgecolor="white", lw=0.3, density=True)
+    ax.axvline(med_tot, color="black", ls="--", lw=1.5,
+               label=f"Median: {med_tot} partners")
+    ax.set_xlabel("Total Partners Across 4 Periods")
+    ax.set_ylabel("Density")
+    ax.set_title(
+        f"Distribution of Total Partners\n"
+        f"(>50 bucket: {upper_lo}–{upper_hi} per period)"
+    )
+    ax.legend(fontsize=8)
+
+    # Right: theoretical CI as a function of total partners
+    t_range = np.arange(N_PERIODS * upper_lo, N_PERIODS * upper_hi + 1)
+    ci_p_th = 1.0 - (1.0 - p_ci * p_t) ** t_range
+    ci_v_th = 1.0 - (1.0 - p_ci * p_t * (1.0 - V)) ** t_range
+
+    ax = axes3[1]
+    ax.plot(t_range, ci_p_th, color="tomato",    lw=2, label="Placebo")
+    ax.plot(t_range, ci_v_th, color="steelblue", lw=2, label="Vaccinated")
+    ax.axvline(med_tot, color="black", ls="--", lw=1.5, alpha=0.7,
+               label=f"Median: {med_tot} partners")
+    ax.set_xlabel("Total Partners Across 4 Periods")
+    ax.set_ylabel("Proportion Infected")
+    ax.set_title(
+        f"Cumulative Incidence by Total Partners\n"
+        f"(>50 bucket: {upper_lo}–{upper_hi} per period)"
+    )
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: f"{y:.1%}"))
+    ax.legend(fontsize=8)
+
+    plt.tight_layout()
+    st.pyplot(fig3)
+    plt.close(fig3)
 
     # ── Summary table ──────────────────────────────────────────────────────────
     st.subheader("Summary Statistics (across simulation runs)")
@@ -447,19 +484,19 @@ if run_btn:
         use_container_width=True,
     )
 
-    # ── Per-bucket detail (expander) ───────────────────────────────────────────
+    # ── Per-bucket detail ─────────────────────────────────────────────────────
     with st.expander("Per-bucket infection detail (medians across runs)"):
         bk_df = pd.DataFrame({
-            "Bucket":                ACTIVE_LABELS,
-            "Range":                 [f"{r[0]}–{r[1]}" for r in bucket_ranges],
-            "Vax N (med)":           np.median(vax_bn, 0).astype(int),
-            "Vax Infections (med)":  np.median(vax_bi, 0).round(1),
-            "Vax Attack Rate (med)": np.nanmedian(vax_ar, 0).round(4),
-            "Vax % of Inf (med)":    (np.nanmedian(vax_pct, 0) * 100).round(1),
-            "Pbo N (med)":           np.median(pbo_bn, 0).astype(int),
-            "Pbo Infections (med)":  np.median(pbo_bi, 0).round(1),
-            "Pbo Attack Rate (med)": np.nanmedian(pbo_ar, 0).round(4),
-            "Pbo % of Inf (med)":    (np.nanmedian(pbo_pct, 0) * 100).round(1),
+            "Bucket":                        ACTIVE_LABELS,
+            "Range":                         [f"{r[0]}–{r[1]}" for r in bucket_ranges],
+            "Vax N (med)":                   np.median(vax_bn, 0).astype(int),
+            "Vax Infections (med)":          np.median(vax_bi, 0).round(1),
+            "Vax Cum. Incidence (med)":      np.nanmedian(vax_ci_bucket, 0).round(4),
+            "Vax % of All Infections (med)": (np.nanmedian(vax_pct, 0) * 100).round(1),
+            "Pbo N (med)":                   np.median(pbo_bn, 0).astype(int),
+            "Pbo Infections (med)":          np.median(pbo_bi, 0).round(1),
+            "Pbo Cum. Incidence (med)":      np.nanmedian(pbo_ci_bucket, 0).round(4),
+            "Pbo % of All Infections (med)": (np.nanmedian(pbo_pct, 0) * 100).round(1),
         })
         st.dataframe(bk_df, hide_index=True, use_container_width=True)
 
