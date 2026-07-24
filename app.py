@@ -2,10 +2,6 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import requests
-import json
-import base64
-from datetime import datetime
 
 # ─────────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Per-Contact VE Dashboard", layout="wide")
@@ -27,6 +23,7 @@ MISSING_OPTS  = [
     "All → highest risk (>50)",
     "All → lowest risk (0–1)",
 ]
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Core helpers
@@ -102,49 +99,6 @@ def bar_with_iqr(ax, x_pos, medians, q25, q75, color, label, width=0.35):
     )
 
 
-def save_to_github(run_record, token, owner, repo, branch, filepath):
-    """Write a new file to a GitHub repo via the Contents API."""
-    content = json.dumps(run_record, indent=2)
-    encoded = base64.b64encode(content.encode()).decode()
-    url     = f"https://api.github.com/repos/{owner}/{repo}/contents/{filepath}"
-    headers = {
-        "Authorization": f"token {token}",
-        "Accept":        "application/vnd.github.v3+json",
-    }
-    payload = {
-        "message": f"Add VE simulation run {filepath.split('/')[-1].replace('.json','')}",
-        "content": encoded,
-        "branch":  branch,
-    }
-    try:
-        r = requests.put(url, headers=headers, json=payload, timeout=15)
-        return r.status_code, r.json()
-    except Exception as e:
-        return None, {"error": str(e)}
-
-
-def safe_float(x):
-    """Return Python float or None (for NaN), safe for JSON serialisation."""
-    try:
-        f = float(x)
-        return None if (f != f) else f   # f != f is True only for NaN
-    except Exception:
-        return None
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# GitHub credentials from Streamlit secrets (optional)
-# ─────────────────────────────────────────────────────────────────────────────
-try:
-    GH_TOKEN  = st.secrets["GITHUB_TOKEN"]
-    GH_OWNER  = st.secrets["GITHUB_OWNER"]
-    GH_REPO   = st.secrets["GITHUB_REPO"]
-    GH_BRANCH = st.secrets.get("GITHUB_BRANCH", "main")
-    github_configured = True
-except Exception:
-    github_configured = False
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Session-state init (once on first load)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -185,13 +139,8 @@ with st.sidebar:
     st.divider()
 
     st.header("Simulation")
-    n_runs    = int(st.number_input("Runs",        value=100, min_value=1, max_value=2000, step=50))
-    seed      = int(st.number_input("Random seed", value=42,  min_value=0))
-    run_label = st.text_input(
-        "Run label / notes",
-        placeholder="e.g. 'Base case, V=0.5'",
-        help="Included in saved JSON output so you can tell runs apart.",
-    )
+    n_runs  = int(st.number_input("Runs",        value=100, min_value=1, max_value=2000, step=50))
+    seed    = int(st.number_input("Random seed", value=42,  min_value=0))
     run_btn = st.button("▶  Run Simulation", type="primary", use_container_width=True)
 
 
@@ -270,8 +219,7 @@ with st.expander("📌 Model Assumptions"):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Run simulation — store all results in session_state so they persist
-# across button-click re-renders (needed for the save buttons to work)
+# Run simulation
 # ─────────────────────────────────────────────────────────────────────────────
 if run_btn:
     if not vax_ok or not pbo_ok:
@@ -324,62 +272,6 @@ if run_btn:
     ve_lo = float(df.ve.quantile(0.025))
     ve_hi = float(df.ve.quantile(0.975))
 
-    # ── Store everything so results section renders on every re-render ────────
-    st.session_state["sim_results"] = {
-        "df":            df,
-        "vax_bi":        vax_bi,
-        "pbo_bi":        pbo_bi,
-        "vax_bn":        vax_bn,
-        "pbo_bn":        pbo_bn,
-        "vax_ci_bucket": vax_ci_bucket,
-        "pbo_ci_bucket": pbo_ci_bucket,
-        "vax_pct":       vax_pct,
-        "pbo_pct":       pbo_pct,
-        "n_nan":         n_nan,
-        "ve_lo":         ve_lo,
-        "ve_hi":         ve_hi,
-        "params": {
-            "N_tot":         N_tot,
-            "N_vax":         N_vax,
-            "N_placebo":     N_placebo,
-            "upper_lo":      upper_lo,
-            "upper_hi":      upper_hi,
-            "bucket_ranges": bucket_ranges,
-            "p_ci":          p_ci,
-            "p_t":           p_t,
-            "V":             V,
-            "n_runs":        n_runs,
-            "seed":          seed,
-            "run_label":     run_label,
-            "vax_counts":    vax_counts,
-            "pbo_counts":    pbo_counts,
-            "vax_miss":      vax_miss,
-            "pbo_miss":      pbo_miss,
-            "vax_props":     vax_props,
-            "pbo_props":     pbo_props,
-        },
-    }
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Render results (reads from session_state — persists across all re-renders)
-# ─────────────────────────────────────────────────────────────────────────────
-if "sim_results" in st.session_state:
-    res           = st.session_state["sim_results"]
-    df            = res["df"]
-    vax_bi        = res["vax_bi"]
-    pbo_bi        = res["pbo_bi"]
-    vax_bn        = res["vax_bn"]
-    pbo_bn        = res["pbo_bn"]
-    vax_ci_bucket = res["vax_ci_bucket"]
-    pbo_ci_bucket = res["pbo_ci_bucket"]
-    vax_pct       = res["vax_pct"]
-    pbo_pct       = res["pbo_pct"]
-    n_nan         = res["n_nan"]
-    ve_lo         = res["ve_lo"]
-    ve_hi         = res["ve_hi"]
-    p             = res["params"]
-
     if n_nan:
         st.warning(
             f"{n_nan} run(s) had zero placebo infections → CIR/VE undefined. "
@@ -388,8 +280,6 @@ if "sim_results" in st.session_state:
 
     # ── Top-line metrics ──────────────────────────────────────────────────────
     st.header("Results")
-    if p["run_label"]:
-        st.caption(f"Showing results for run: **{p['run_label']}**")
 
     def iqr_str(s):
         return f"IQR: [{s.quantile(0.25):.4f}, {s.quantile(0.75):.4f}]"
@@ -508,22 +398,20 @@ if "sim_results" in st.session_state:
     plt.close(fig2)
 
     # ── Figure 3: Within >50 bucket detail ────────────────────────────────────
-    _ulo = p["upper_lo"];  _uhi = p["upper_hi"]
-    _pci = p["p_ci"];      _pt  = p["p_t"];     _V = p["V"]
-
     st.subheader(">50 Partner Bucket: Within-Bucket Detail")
     st.caption(
-        f"**Left:** distribution of total partners across all 4 periods for a person in the "
-        f">50 bucket (Discrete Uniform {_ulo}–{_uhi} per period; 200k analytical draws). "
+        f"**Left:** distribution of total partners across all 4 periods for a person "
+        f"in the >50 bucket (Discrete Uniform {upper_lo}–{upper_hi} per period; "
+        f"200k analytical draws). "
         f"**Right:** theoretical cumulative incidence as a function of total partners."
     )
 
     fig3, axes3 = plt.subplots(1, 2, figsize=(12, 4))
-    rng_vis = np.random.default_rng(0)
-    n_vis   = 200_000
-    span_b4 = _uhi - _ulo + 1
+    rng_vis  = np.random.default_rng(0)
+    n_vis    = 200_000
+    span_b4  = upper_hi - upper_lo + 1
     tot_part = np.sum(
-        _ulo + np.floor(rng_vis.random((n_vis, N_PERIODS)) * span_b4).astype(int),
+        upper_lo + np.floor(rng_vis.random((n_vis, N_PERIODS)) * span_b4).astype(int),
         axis=1,
     )
     med_tot = int(np.median(tot_part))
@@ -534,20 +422,20 @@ if "sim_results" in st.session_state:
     ax.axvline(med_tot, color="black", ls="--", lw=1.5,
                label=f"Median: {med_tot} partners")
     ax.set_xlabel("Total Partners Across 4 Periods"); ax.set_ylabel("Density")
-    ax.set_title(f"Distribution of Total Partners\n(>50 bucket: {_ulo}–{_uhi} per period)")
+    ax.set_title(f"Distribution of Total Partners\n(>50 bucket: {upper_lo}–{upper_hi} per period)")
     ax.legend(fontsize=8)
 
-    t_range = np.arange(N_PERIODS * _ulo, N_PERIODS * _uhi + 1)
+    t_range = np.arange(N_PERIODS * upper_lo, N_PERIODS * upper_hi + 1)
     ax = axes3[1]
-    ax.plot(t_range, 1.0 - (1.0 - _pci * _pt) ** t_range,
+    ax.plot(t_range, 1.0 - (1.0 - p_ci * p_t) ** t_range,
             color="tomato",    lw=2, label="Placebo")
-    ax.plot(t_range, 1.0 - (1.0 - _pci * _pt * (1.0 - _V)) ** t_range,
+    ax.plot(t_range, 1.0 - (1.0 - p_ci * p_t * (1.0 - V)) ** t_range,
             color="steelblue", lw=2, label="Vaccinated")
     ax.axvline(med_tot, color="black", ls="--", lw=1.5, alpha=0.7,
                label=f"Median: {med_tot} partners")
     ax.set_xlabel("Total Partners Across 4 Periods")
     ax.set_ylabel("Proportion Infected")
-    ax.set_title(f"Cumulative Incidence by Total Partners\n(>50 bucket: {_ulo}–{_uhi} per period)")
+    ax.set_title(f"Cumulative Incidence by Total Partners\n(>50 bucket: {upper_lo}–{upper_hi} per period)")
     ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: f"{y:.1%}"))
     ax.legend(fontsize=8)
 
@@ -576,7 +464,7 @@ if "sim_results" in st.session_state:
     with st.expander("Per-bucket infection detail (medians across runs)"):
         bk_df = pd.DataFrame({
             "Bucket":                        ACTIVE_LABELS,
-            "Range":                         [f"{r[0]}–{r[1]}" for r in p["bucket_ranges"]],
+            "Range":                         [f"{r[0]}–{r[1]}" for r in bucket_ranges],
             "Vax N (med)":                   np.median(vax_bn, 0).astype(int),
             "Vax Infections (med)":          np.median(vax_bi, 0).round(1),
             "Vax Cum. Incidence (med)":      np.nanmedian(vax_ci_bucket, 0).round(4),
@@ -592,110 +480,10 @@ if "sim_results" in st.session_state:
         st.dataframe(
             pd.DataFrame({
                 "Bucket":  ACTIVE_LABELS,
-                "Range":   [f"{r[0]}–{r[1]}" for r in p["bucket_ranges"]],
-                "Vax":     [f"{prop:.4f}" for prop in p["vax_props"]],
-                "Placebo": [f"{prop:.4f}" for prop in p["pbo_props"]],
+                "Range":   [f"{r[0]}–{r[1]}" for r in bucket_ranges],
+                "Vax":     [f"{p:.4f}" for p in vax_props],
+                "Placebo": [f"{p:.4f}" for p in pbo_props],
             }),
             hide_index=True,
             use_container_width=True,
         )
-
-    # ── Save results ───────────────────────────────────────────────────────────
-    st.divider()
-    st.subheader("💾 Save This Run")
-    st.caption(
-        "The JSON file includes all parameters and summary statistics for this run. "
-        "Add a label in the sidebar before running to keep scenarios organised."
-    )
-
-    # Build JSON-safe run record
-    run_record = {
-        "timestamp": datetime.now().isoformat(),
-        "label":     p["run_label"] or "(unlabelled)",
-        "parameters": {
-            "N_tot":              p["N_tot"],
-            "N_vax":              p["N_vax"],
-            "N_placebo":          p["N_placebo"],
-            "vax_counts":         p["vax_counts"],
-            "pbo_counts":         p["pbo_counts"],
-            "vax_missing_mode":   p["vax_miss"],
-            "pbo_missing_mode":   p["pbo_miss"],
-            "upper_lo":           p["upper_lo"],
-            "upper_hi":           p["upper_hi"],
-            "p_contact_infected": p["p_ci"],
-            "p_transmission":     p["p_t"],
-            "V_per_contact":      p["V"],
-            "n_runs":             p["n_runs"],
-            "seed":               p["seed"],
-            "bucket_labels":      BUCKET_LABELS,
-        },
-        "results": {
-            "median_ci_vax":      safe_float(df.ci_v.median()),
-            "median_ci_pbo":      safe_float(df.ci_p.median()),
-            "median_cir":         safe_float(df.cir.median()),
-            "median_ve":          safe_float(df.ve.median()),
-            "q25_ci_vax":         safe_float(df.ci_v.quantile(0.25)),
-            "q75_ci_vax":         safe_float(df.ci_v.quantile(0.75)),
-            "q25_ci_pbo":         safe_float(df.ci_p.quantile(0.25)),
-            "q75_ci_pbo":         safe_float(df.ci_p.quantile(0.75)),
-            "q25_cir":            safe_float(df.cir.quantile(0.25)),
-            "q75_cir":            safe_float(df.cir.quantile(0.75)),
-            "q25_ve":             safe_float(df.ve.quantile(0.25)),
-            "q75_ve":             safe_float(df.ve.quantile(0.75)),
-            "ve_2_5pct":          safe_float(ve_lo),
-            "ve_97_5pct":         safe_float(ve_hi),
-            "mean_ci_vax":        safe_float(df.ci_v.mean()),
-            "mean_ci_pbo":        safe_float(df.ci_p.mean()),
-            "mean_cir":           safe_float(df.cir.mean()),
-            "mean_ve":            safe_float(df.ve.mean()),
-            "sd_ci_vax":          safe_float(df.ci_v.std()),
-            "sd_ci_pbo":          safe_float(df.ci_p.std()),
-            "sd_cir":             safe_float(df.cir.std()),
-            "sd_ve":              safe_float(df.ve.std()),
-            "n_runs_nan_ve":      n_nan,
-        },
-    }
-    json_str = json.dumps(run_record, indent=2)
-    ts_now   = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    save_msg     = st.empty()   # placeholder for success / error feedback
-    scol1, scol2 = st.columns(2)
-
-    # Download button — always available, no secrets needed
-    with scol1:
-        st.download_button(
-            label="⬇️  Download results as JSON",
-            data=json_str,
-            file_name=f"ve_run_{ts_now}.json",
-            mime="application/json",
-            use_container_width=True,
-            help="Downloads parameters + summary statistics as a JSON file.",
-        )
-
-    # GitHub save — only if secrets are configured
-    with scol2:
-        if github_configured:
-            if st.button("📤  Save to GitHub repo", use_container_width=True,
-                         help="Saves a timestamped JSON to the results/ folder of your repo."):
-                gh_filename = f"results/run_{ts_now}.json"
-                status_code, resp_data = save_to_github(
-                    run_record, GH_TOKEN, GH_OWNER, GH_REPO, GH_BRANCH, gh_filename
-                )
-                if status_code == 201:
-                    save_msg.success(f"✅ Saved to GitHub: `{gh_filename}`")
-                else:
-                    err = resp_data.get("message", "") if isinstance(resp_data, dict) else str(resp_data)
-                    save_msg.error(
-                        f"❌ GitHub save failed "
-                        f"(HTTP {status_code if status_code else 'connection error'}) — {err}. "
-                        "Check token permissions and repo name in secrets."
-                    )
-        else:
-            with st.expander("ℹ️ Enable GitHub saving — setup instructions"):
-                st.markdown("""
-**Local development** — create `.streamlit/secrets.toml` (add this file to `.gitignore`):
-```toml
-GITHUB_TOKEN  = "ghp_xxxxxxxxxxxxxxxxxxxx"
-GITHUB_OWNER  = "your-github-username"
-GITHUB_REPO   = "your-repo-name"
-GITHUB_BRANCH = "main"
