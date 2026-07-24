@@ -1,8 +1,3 @@
----
-
-### `index.html`
-
-```html
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -115,7 +110,7 @@
       A Streamlit simulation tool for back-of-the-envelope per-contact VE calculations
       in a heterogeneous sexual-partner-count population.
     </p>
-    <p class="meta">Created: July 14, 2025 &nbsp;·&nbsp; Last updated: July 24, 2026 &nbsp;·&nbsp; Platform: Python / Streamlit</p>
+    <p class="meta">Created: July 14, 2025 &nbsp;·&nbsp; Last updated: July 24, 2025 &nbsp;·&nbsp; Platform: Python / Streamlit</p>
   </div>
 
 
@@ -137,8 +132,6 @@
       The tool runs a configurable number of Monte Carlo simulations (default 100) over
       a 2-year study period divided into four 6-month intervals. Results are summarised
       with medians and IQRs across runs, and displayed as interactive charts and tables.
-      Individual simulation runs can be saved as JSON files, either downloaded locally
-      or written directly to the GitHub repository.
     </p>
   </div>
 
@@ -155,7 +148,6 @@
         <tr><td>Follow-up periods</td><td>4</td><td>Fixed; each period = 6 months (2 years total)</td></tr>
         <tr><td>Simulation runs</td><td>100</td><td>1 – 2,000; more runs → tighter summaries</td></tr>
         <tr><td>Random seed</td><td>42</td><td>Any non-negative integer; fixes reproducibility</td></tr>
-        <tr><td>Run label / notes</td><td>(blank)</td><td>Optional free-text field included in saved JSON output</td></tr>
       </tbody>
     </table>
   </div>
@@ -291,7 +283,7 @@ VE  = 1 − CIR</div>
     <ul>
       <li><strong>Left:</strong> median absolute infections per bucket (vaccinated vs. placebo)</li>
       <li><strong>Centre:</strong> median cumulative incidence per bucket — the proportion of people in each bucket who become infected</li>
-      <li><strong>Right:</strong> share of total infections attributable to each bucket</li>
+      <li><strong>Right:</strong> share of total infections attributable to each bucket — illustrates that high-activity buckets drive a disproportionate fraction of events</li>
       <li>All bars show IQR as error bars</li>
     </ul>
 
@@ -312,27 +304,6 @@ VE  = 1 − CIR</div>
       <li><strong>Per-bucket infection detail</strong> — median N, infections, cumulative incidence, and % of all infections for each bucket in each arm</li>
       <li><strong>Effective bucket proportions</strong> — post-redistribution proportions actually used in the run</li>
     </ul>
-
-    <h3>Save results</h3>
-    <p>
-      After each simulation run a <strong>Save This Run</strong> section appears with two options:
-    </p>
-    <ul>
-      <li>
-        <strong>⬇️ Download as JSON</strong> — always available, no configuration needed.
-        Downloads a timestamped JSON file containing all parameters and summary statistics.
-      </li>
-      <li>
-        <strong>📤 Save to GitHub repo</strong> — available when GitHub credentials are
-        configured (see below). Writes the same JSON to a <code>results/</code> folder in
-        your repository, named <code>run_YYYYMMDD_HHMMSS.json</code>.
-      </li>
-    </ul>
-    <p>
-      An optional <strong>Run label / notes</strong> field in the sidebar lets you annotate
-      each run (e.g., <em>"Base case, V=0.5, high-risk enriched in placebo"</em>) before
-      running so saved files are easy to tell apart.
-    </p>
   </div>
 
 
@@ -358,8 +329,7 @@ VE  = 1 − CIR</div>
         Changed from "per-act" to <strong>"per-contact"</strong> throughout the app
         title, headings, and documentation. "Per-contact" is more precise
         epidemiological language for this type of transmission model and better
-        reflects the mathematical quantity being estimated (per-contact
-        probability of transmission).
+        reflects the mathematical quantity being estimated.
       </p>
     </div>
 
@@ -452,20 +422,6 @@ VE  = 1 − CIR</div>
     </div>
 
     <div class="decision">
-      <p class="q">How should simulation runs be saved / exported?</p>
-      <p class="a">
-        <span class="badge badge-blue">Decision</span>
-        Two export options: (1) a browser <strong>Download JSON</strong> button — always
-        available, no configuration required; (2) a <strong>Save to GitHub repo</strong>
-        button that writes a timestamped JSON file to a <code>results/</code> folder in
-        the repository via the GitHub Contents API. The GitHub option requires a
-        Personal Access Token stored in Streamlit secrets. Results are stored in
-        <code>st.session_state</code> after each run so that both save buttons remain
-        functional across Streamlit re-renders without needing to re-run the simulation.
-      </p>
-    </div>
-
-    <div class="decision">
       <p class="q">How many simulation runs?</p>
       <p class="a">
         <span class="badge badge-blue">Decision</span>
@@ -482,15 +438,14 @@ VE  = 1 − CIR</div>
     <h2>🚀 How to Run &amp; Deploy</h2>
 
     <h3>Run locally</h3>
-    <div class="formula-block">pip install streamlit numpy pandas matplotlib requests
+    <div class="formula-block">pip install streamlit numpy pandas matplotlib
 streamlit run app.py</div>
 
     <h3>requirements.txt</h3>
     <div class="formula-block">streamlit
 numpy
 pandas
-matplotlib
-requests</div>
+matplotlib</div>
 
     <h3>Deploy to Streamlit Community Cloud (free, shareable URL)</h3>
     <ol class="step-list">
@@ -501,24 +456,14 @@ requests</div>
       <li>Share the URL — no Python installation needed.</li>
     </ol>
 
-    <h3>Configure GitHub saving (optional)</h3>
+    <h3>Managing resource usage</h3>
     <p>
-      To enable the <em>Save to GitHub repo</em> button, you need a GitHub Personal Access
-      Token with <strong>Contents: Read &amp; Write</strong> permission on your repo.
-      A <a href="https://github.com/settings/tokens?type=beta" target="_blank">fine-grained
-      token</a> scoped to only this repository is recommended.
+      Streamlit Community Cloud has a free usage allocation. To avoid running over it,
+      put the app to sleep when not in use: open the app, click
+      <strong>Manage app</strong> in the bottom-right corner, then select
+      <strong>Put app to sleep</strong>. The app wakes automatically when someone
+      visits the URL.
     </p>
-
-    <p><strong>Local development</strong> — create <code>.streamlit/secrets.toml</code>
-    and add it to <code>.gitignore</code>:</p>
-    <div class="formula-block">GITHUB_TOKEN  = "ghp_xxxxxxxxxxxxxxxxxxxx"
-GITHUB_OWNER  = "your-github-username"
-GITHUB_REPO   = "your-repo-name"
-GITHUB_BRANCH = "main"</div>
-
-    <p><strong>Streamlit Community Cloud</strong> — go to your app → ⋮ menu →
-    <em>Settings → Secrets</em> and paste the same four lines. No file needs to be
-    committed. Saved runs will appear in a <code>results/</code> folder in your repo.</p>
   </div>
 
 
@@ -526,13 +471,11 @@ GITHUB_BRANCH = "main"</div>
   <div class="card">
     <h2>📁 Repository Files</h2>
     <table>
-      <thead><tr><th>File / Folder</th><th>Description</th></tr></thead>
+      <thead><tr><th>File</th><th>Description</th></tr></thead>
       <tbody>
         <tr><td><code>app.py</code></td><td>Main Streamlit application — all simulation logic and UI</td></tr>
         <tr><td><code>requirements.txt</code></td><td>Python dependencies for Streamlit Community Cloud deployment</td></tr>
         <tr><td><code>index.html</code></td><td>This file — full design and decision documentation (served via GitHub Pages)</td></tr>
-        <tr><td><code>results/</code></td><td>Auto-created folder; timestamped JSON files written here by the "Save to GitHub" button</td></tr>
-        <tr><td><code>.streamlit/secrets.toml</code></td><td>Local secrets file (GitHub token etc.) — <strong>not committed</strong>, add to <code>.gitignore</code></td></tr>
       </tbody>
     </table>
   </div>
@@ -540,7 +483,7 @@ GITHUB_BRANCH = "main"</div>
 
   <footer>
     Per-Contact Vaccine Efficacy Dashboard &nbsp;·&nbsp;
-    Created July 14, 2025 &nbsp;·&nbsp; Last updated July 24, 2026
+    Created July 14, 2025 &nbsp;·&nbsp; Last updated July 24, 2025
   </footer>
 
 </div>
