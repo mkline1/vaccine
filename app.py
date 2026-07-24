@@ -2,10 +2,14 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import requests
+import json
+import base64
+from datetime import datetime
 
 # ─────────────────────────────────────────────────────────────────────────────
-st.set_page_config(page_title="Per-Act VE Dashboard", layout="wide")
-st.title("🔬 Per-Act Vaccine Efficacy Dashboard")
+st.set_page_config(page_title="Per-Contact VE Dashboard", layout="wide")
+st.title("🔬 Per-Contact Vaccine Efficacy Dashboard")
 st.markdown(
     "Simulate **VE = 1 − CIR** over 4 six-month periods (2 years). "
     "Set partner-count distributions per arm, then hit **▶ Run Simulation**."
@@ -23,7 +27,6 @@ MISSING_OPTS  = [
     "All → highest risk (>50)",
     "All → lowest risk (0–1)",
 ]
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Core helpers
@@ -91,13 +94,55 @@ def run_one_simulation(
 
 
 def bar_with_iqr(ax, x_pos, medians, q25, q75, color, label, width=0.35):
-    """Grouped bar with IQR error bars; clips error to ≥ 0 for robustness."""
     ax.bar(x_pos, medians, width, color=color, alpha=0.85, label=label)
     ax.errorbar(
         x_pos, medians,
         yerr=[np.clip(medians - q25, 0, None), np.clip(q75 - medians, 0, None)],
         fmt="none", color=color, capsize=3, lw=1.2, alpha=0.9,
     )
+
+
+def save_to_github(run_record, token, owner, repo, branch, filepath):
+    """Write a new file to a GitHub repo via the Contents API."""
+    content = json.dumps(run_record, indent=2)
+    encoded = base64.b64encode(content.encode()).decode()
+    url     = f"https://api.github.com/repos/{owner}/{repo}/contents/{filepath}"
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept":        "application/vnd.github.v3+json",
+    }
+    payload = {
+        "message": f"Add VE simulation run {filepath.split('/')[-1].replace('.json','')}",
+        "content": encoded,
+        "branch":  branch,
+    }
+    try:
+        r = requests.put(url, headers=headers, json=payload, timeout=15)
+        return r.status_code, r.json()
+    except Exception as e:
+        return None, {"error": str(e)}
+
+
+def safe_float(x):
+    """Return Python float or None (for NaN), safe for JSON serialisation."""
+    try:
+        f = float(x)
+        return None if (f != f) else f   # f != f is True only for NaN
+    except Exception:
+        return None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GitHub credentials from Streamlit secrets (optional)
+# ─────────────────────────────────────────────────────────────────────────────
+try:
+    GH_TOKEN  = st.secrets["GITHUB_TOKEN"]
+    GH_OWNER  = st.secrets["GITHUB_OWNER"]
+    GH_REPO   = st.secrets["GITHUB_REPO"]
+    GH_BRANCH = st.secrets.get("GITHUB_BRANCH", "main")
+    github_configured = True
+except Exception:
+    github_configured = False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -140,8 +185,13 @@ with st.sidebar:
     st.divider()
 
     st.header("Simulation")
-    n_runs  = int(st.number_input("Runs",        value=100, min_value=1, max_value=2000, step=50))
-    seed    = int(st.number_input("Random seed", value=42,  min_value=0))
+    n_runs    = int(st.number_input("Runs",        value=100, min_value=1, max_value=2000, step=50))
+    seed      = int(st.number_input("Random seed", value=42,  min_value=0))
+    run_label = st.text_input(
+        "Run label / notes",
+        placeholder="e.g. 'Base case, V=0.5'",
+        help="Included in saved JSON output so you can tell runs apart.",
+    )
     run_btn = st.button("▶  Run Simulation", type="primary", use_container_width=True)
 
 
@@ -220,7 +270,8 @@ with st.expander("📌 Model Assumptions"):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Run simulation
+# Run simulation — store all results in session_state so they persist
+# across button-click re-renders (needed for the save buttons to work)
 # ─────────────────────────────────────────────────────────────────────────────
 if run_btn:
     if not vax_ok or not pbo_ok:
@@ -231,7 +282,7 @@ if run_btn:
     vax_props = get_adjusted_props(vax_counts, vax_miss)
     pbo_props = get_adjusted_props(pbo_counts, pbo_miss)
 
-    rng = np.random.default_rng(seed)
+    rng     = np.random.default_rng(seed)
     results = []
     vax_bi_all, pbo_bi_all = [], []
     vax_bn_all, pbo_bn_all = [], []
@@ -253,48 +304,103 @@ if run_btn:
         vax_bi_all.append(vbi);  pbo_bi_all.append(pbi)
         vax_bn_all.append(vbn);  pbo_bn_all.append(pbn)
         prog.progress((i + 1) / n_runs)
-
     prog.empty()
-    df = pd.DataFrame(results)
 
+    df     = pd.DataFrame(results)
     vax_bi = np.array(vax_bi_all)
     pbo_bi = np.array(pbo_bi_all)
     vax_bn = np.array(vax_bn_all)
     pbo_bn = np.array(pbo_bn_all)
 
-    # Cumulative incidence per bucket (proportion of that bucket's people infected)
     with np.errstate(divide="ignore", invalid="ignore"):
         vax_ci_bucket = np.where(vax_bn > 0, vax_bi / vax_bn, np.nan)
         pbo_ci_bucket = np.where(pbo_bn > 0, pbo_bi / pbo_bn, np.nan)
-
-    # Share of all infections coming from each bucket
-    with np.errstate(divide="ignore", invalid="ignore"):
         vax_tot = vax_bi.sum(axis=1, keepdims=True)
         pbo_tot = pbo_bi.sum(axis=1, keepdims=True)
         vax_pct = np.where(vax_tot > 0, vax_bi / vax_tot, np.nan)
         pbo_pct = np.where(pbo_tot > 0, pbo_bi / pbo_tot, np.nan)
 
-    n_nan = df.ve.isna().sum()
+    n_nan = int(df.ve.isna().sum())
+    ve_lo = float(df.ve.quantile(0.025))
+    ve_hi = float(df.ve.quantile(0.975))
+
+    # ── Store everything so results section renders on every re-render ────────
+    st.session_state["sim_results"] = {
+        "df":            df,
+        "vax_bi":        vax_bi,
+        "pbo_bi":        pbo_bi,
+        "vax_bn":        vax_bn,
+        "pbo_bn":        pbo_bn,
+        "vax_ci_bucket": vax_ci_bucket,
+        "pbo_ci_bucket": pbo_ci_bucket,
+        "vax_pct":       vax_pct,
+        "pbo_pct":       pbo_pct,
+        "n_nan":         n_nan,
+        "ve_lo":         ve_lo,
+        "ve_hi":         ve_hi,
+        "params": {
+            "N_tot":         N_tot,
+            "N_vax":         N_vax,
+            "N_placebo":     N_placebo,
+            "upper_lo":      upper_lo,
+            "upper_hi":      upper_hi,
+            "bucket_ranges": bucket_ranges,
+            "p_ci":          p_ci,
+            "p_t":           p_t,
+            "V":             V,
+            "n_runs":        n_runs,
+            "seed":          seed,
+            "run_label":     run_label,
+            "vax_counts":    vax_counts,
+            "pbo_counts":    pbo_counts,
+            "vax_miss":      vax_miss,
+            "pbo_miss":      pbo_miss,
+            "vax_props":     vax_props,
+            "pbo_props":     pbo_props,
+        },
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Render results (reads from session_state — persists across all re-renders)
+# ─────────────────────────────────────────────────────────────────────────────
+if "sim_results" in st.session_state:
+    res           = st.session_state["sim_results"]
+    df            = res["df"]
+    vax_bi        = res["vax_bi"]
+    pbo_bi        = res["pbo_bi"]
+    vax_bn        = res["vax_bn"]
+    pbo_bn        = res["pbo_bn"]
+    vax_ci_bucket = res["vax_ci_bucket"]
+    pbo_ci_bucket = res["pbo_ci_bucket"]
+    vax_pct       = res["vax_pct"]
+    pbo_pct       = res["pbo_pct"]
+    n_nan         = res["n_nan"]
+    ve_lo         = res["ve_lo"]
+    ve_hi         = res["ve_hi"]
+    p             = res["params"]
+
     if n_nan:
         st.warning(
             f"{n_nan} run(s) had zero placebo infections → CIR/VE undefined. "
             "Excluded from summaries and plots."
         )
 
-    # ── Top-line metrics (medians) ─────────────────────────────────────────────
+    # ── Top-line metrics ──────────────────────────────────────────────────────
     st.header("Results")
-    m1, m2, m3, m4 = st.columns(4)
+    if p["run_label"]:
+        st.caption(f"Showing results for run: **{p['run_label']}**")
 
     def iqr_str(s):
         return f"IQR: [{s.quantile(0.25):.4f}, {s.quantile(0.75):.4f}]"
 
+    m1, m2, m3, m4 = st.columns(4)
     m1.metric("Median CI — vaccinated", f"{df.ci_v.median():.3f}")
     m1.caption(iqr_str(df.ci_v))
     m2.metric("Median CI — placebo",    f"{df.ci_p.median():.3f}")
     m2.caption(iqr_str(df.ci_p))
     m3.metric("Median CIR",             f"{df.cir.median():.3f}")
     m3.caption(iqr_str(df.cir))
-    ve_lo, ve_hi = df.ve.quantile(0.025), df.ve.quantile(0.975)
     m4.metric("Median VE (1 − CIR)",    f"{df.ve.median():.3f}")
     m4.caption(f"95% sim. interval: [{ve_lo:.3f}, {ve_hi:.3f}]")
 
@@ -350,7 +456,6 @@ if run_btn:
     x = np.arange(5)
     w = 0.35
 
-    # Panel A: absolute infections
     ax = axes2[0]
     bar_with_iqr(
         ax, x - w/2, np.median(vax_bi, 0),
@@ -364,10 +469,8 @@ if run_btn:
     )
     ax.set_xticks(x); ax.set_xticklabels(ACTIVE_LABELS)
     ax.set_xlabel("Partner Count Bucket"); ax.set_ylabel("Infections (n)")
-    ax.set_title("Median Infections per Bucket")
-    ax.legend()
+    ax.set_title("Median Infections per Bucket"); ax.legend()
 
-    # Panel B: cumulative incidence per bucket (renamed from attack rate)
     ax = axes2[1]
     bar_with_iqr(
         ax, x - w/2, np.nanmedian(vax_ci_bucket, 0),
@@ -381,10 +484,8 @@ if run_btn:
     )
     ax.set_xticks(x); ax.set_xticklabels(ACTIVE_LABELS)
     ax.set_xlabel("Partner Count Bucket"); ax.set_ylabel("Proportion Infected")
-    ax.set_title("Median Cumulative Incidence per Bucket")
-    ax.legend()
+    ax.set_title("Median Cumulative Incidence per Bucket"); ax.legend()
 
-    # Panel C: share of total infections
     ax = axes2[2]
     bar_with_iqr(
         ax, x - w/2, np.nanmedian(vax_pct, 0),
@@ -406,59 +507,47 @@ if run_btn:
     st.pyplot(fig2)
     plt.close(fig2)
 
-    # ── Figure 3: Within >50 bucket detail ─────────────────────────────────────
+    # ── Figure 3: Within >50 bucket detail ────────────────────────────────────
+    _ulo = p["upper_lo"];  _uhi = p["upper_hi"]
+    _pci = p["p_ci"];      _pt  = p["p_t"];     _V = p["V"]
+
     st.subheader(">50 Partner Bucket: Within-Bucket Detail")
     st.caption(
-        "**Left:** distribution of total partners accumulated across all 4 periods for a "
-        f"person in the >50 bucket (Discrete Uniform {upper_lo}–{upper_hi} per period; "
-        "analytical via 200k draws from sum of 4 independent uniforms). "
-        "**Right:** theoretical cumulative incidence as a function of those total partners "
-        "— because P(infected) = 1 − (1 − p_per)^total_partners, the relationship is exact "
-        "and does not require simulation. Dashed line marks the median total partner count."
+        f"**Left:** distribution of total partners across all 4 periods for a person in the "
+        f">50 bucket (Discrete Uniform {_ulo}–{_uhi} per period; 200k analytical draws). "
+        f"**Right:** theoretical cumulative incidence as a function of total partners."
     )
 
     fig3, axes3 = plt.subplots(1, 2, figsize=(12, 4))
-
-    # Left: distribution of total partners (sum of 4 uniforms)
-    rng_vis  = np.random.default_rng(0)          # fixed seed → plot is deterministic
-    n_vis    = 200_000
-    span_b4  = upper_hi - upper_lo + 1
+    rng_vis = np.random.default_rng(0)
+    n_vis   = 200_000
+    span_b4 = _uhi - _ulo + 1
     tot_part = np.sum(
-        upper_lo + np.floor(rng_vis.random((n_vis, N_PERIODS)) * span_b4).astype(int),
+        _ulo + np.floor(rng_vis.random((n_vis, N_PERIODS)) * span_b4).astype(int),
         axis=1,
     )
     med_tot = int(np.median(tot_part))
 
     ax = axes3[0]
-    n_bins = min(100, span_b4 * N_PERIODS)
-    ax.hist(tot_part, bins=n_bins, color="mediumpurple",
-            edgecolor="white", lw=0.3, density=True)
+    ax.hist(tot_part, bins=min(100, span_b4 * N_PERIODS),
+            color="mediumpurple", edgecolor="white", lw=0.3, density=True)
     ax.axvline(med_tot, color="black", ls="--", lw=1.5,
                label=f"Median: {med_tot} partners")
-    ax.set_xlabel("Total Partners Across 4 Periods")
-    ax.set_ylabel("Density")
-    ax.set_title(
-        f"Distribution of Total Partners\n"
-        f"(>50 bucket: {upper_lo}–{upper_hi} per period)"
-    )
+    ax.set_xlabel("Total Partners Across 4 Periods"); ax.set_ylabel("Density")
+    ax.set_title(f"Distribution of Total Partners\n(>50 bucket: {_ulo}–{_uhi} per period)")
     ax.legend(fontsize=8)
 
-    # Right: theoretical CI as a function of total partners
-    t_range = np.arange(N_PERIODS * upper_lo, N_PERIODS * upper_hi + 1)
-    ci_p_th = 1.0 - (1.0 - p_ci * p_t) ** t_range
-    ci_v_th = 1.0 - (1.0 - p_ci * p_t * (1.0 - V)) ** t_range
-
+    t_range = np.arange(N_PERIODS * _ulo, N_PERIODS * _uhi + 1)
     ax = axes3[1]
-    ax.plot(t_range, ci_p_th, color="tomato",    lw=2, label="Placebo")
-    ax.plot(t_range, ci_v_th, color="steelblue", lw=2, label="Vaccinated")
+    ax.plot(t_range, 1.0 - (1.0 - _pci * _pt) ** t_range,
+            color="tomato",    lw=2, label="Placebo")
+    ax.plot(t_range, 1.0 - (1.0 - _pci * _pt * (1.0 - _V)) ** t_range,
+            color="steelblue", lw=2, label="Vaccinated")
     ax.axvline(med_tot, color="black", ls="--", lw=1.5, alpha=0.7,
                label=f"Median: {med_tot} partners")
     ax.set_xlabel("Total Partners Across 4 Periods")
     ax.set_ylabel("Proportion Infected")
-    ax.set_title(
-        f"Cumulative Incidence by Total Partners\n"
-        f"(>50 bucket: {upper_lo}–{upper_hi} per period)"
-    )
+    ax.set_title(f"Cumulative Incidence by Total Partners\n(>50 bucket: {_ulo}–{_uhi} per period)")
     ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: f"{y:.1%}"))
     ax.legend(fontsize=8)
 
@@ -471,24 +560,23 @@ if run_btn:
     cols_o = ("ci_v", "ci_p", "cir", "ve")
     summary = pd.DataFrame({
         "Metric":  ["CI vaccinated", "CI placebo", "CIR", "VE"],
-        "Median":  [df[c].median()          for c in cols_o],
-        "25%":     [df[c].quantile(0.25)     for c in cols_o],
-        "75%":     [df[c].quantile(0.75)     for c in cols_o],
-        "2.5%":    [df[c].quantile(0.025)    for c in cols_o],
-        "97.5%":   [df[c].quantile(0.975)    for c in cols_o],
-        "Mean":    [df[c].mean()             for c in cols_o],
-        "SD":      [df[c].std()              for c in cols_o],
+        "Median":  [df[c].median()        for c in cols_o],
+        "25%":     [df[c].quantile(0.25)  for c in cols_o],
+        "75%":     [df[c].quantile(0.75)  for c in cols_o],
+        "2.5%":    [df[c].quantile(0.025) for c in cols_o],
+        "97.5%":   [df[c].quantile(0.975) for c in cols_o],
+        "Mean":    [df[c].mean()          for c in cols_o],
+        "SD":      [df[c].std()           for c in cols_o],
     })
     st.dataframe(
         summary.set_index("Metric").style.format("{:.4f}"),
         use_container_width=True,
     )
 
-    # ── Per-bucket detail ─────────────────────────────────────────────────────
     with st.expander("Per-bucket infection detail (medians across runs)"):
         bk_df = pd.DataFrame({
             "Bucket":                        ACTIVE_LABELS,
-            "Range":                         [f"{r[0]}–{r[1]}" for r in bucket_ranges],
+            "Range":                         [f"{r[0]}–{r[1]}" for r in p["bucket_ranges"]],
             "Vax N (med)":                   np.median(vax_bn, 0).astype(int),
             "Vax Infections (med)":          np.median(vax_bi, 0).round(1),
             "Vax Cum. Incidence (med)":      np.nanmedian(vax_ci_bucket, 0).round(4),
@@ -500,15 +588,114 @@ if run_btn:
         })
         st.dataframe(bk_df, hide_index=True, use_container_width=True)
 
-    # ── Effective proportions used ─────────────────────────────────────────────
     with st.expander("Effective bucket proportions used in this run"):
         st.dataframe(
             pd.DataFrame({
                 "Bucket":  ACTIVE_LABELS,
-                "Range":   [f"{r[0]}–{r[1]}" for r in bucket_ranges],
-                "Vax":     [f"{p:.4f}" for p in vax_props],
-                "Placebo": [f"{p:.4f}" for p in pbo_props],
+                "Range":   [f"{r[0]}–{r[1]}" for r in p["bucket_ranges"]],
+                "Vax":     [f"{prop:.4f}" for prop in p["vax_props"]],
+                "Placebo": [f"{prop:.4f}" for prop in p["pbo_props"]],
             }),
             hide_index=True,
             use_container_width=True,
         )
+
+    # ── Save results ───────────────────────────────────────────────────────────
+    st.divider()
+    st.subheader("💾 Save This Run")
+    st.caption(
+        "The JSON file includes all parameters and summary statistics for this run. "
+        "Add a label in the sidebar before running to keep scenarios organised."
+    )
+
+    # Build JSON-safe run record
+    run_record = {
+        "timestamp": datetime.now().isoformat(),
+        "label":     p["run_label"] or "(unlabelled)",
+        "parameters": {
+            "N_tot":              p["N_tot"],
+            "N_vax":              p["N_vax"],
+            "N_placebo":          p["N_placebo"],
+            "vax_counts":         p["vax_counts"],
+            "pbo_counts":         p["pbo_counts"],
+            "vax_missing_mode":   p["vax_miss"],
+            "pbo_missing_mode":   p["pbo_miss"],
+            "upper_lo":           p["upper_lo"],
+            "upper_hi":           p["upper_hi"],
+            "p_contact_infected": p["p_ci"],
+            "p_transmission":     p["p_t"],
+            "V_per_contact":      p["V"],
+            "n_runs":             p["n_runs"],
+            "seed":               p["seed"],
+            "bucket_labels":      BUCKET_LABELS,
+        },
+        "results": {
+            "median_ci_vax":      safe_float(df.ci_v.median()),
+            "median_ci_pbo":      safe_float(df.ci_p.median()),
+            "median_cir":         safe_float(df.cir.median()),
+            "median_ve":          safe_float(df.ve.median()),
+            "q25_ci_vax":         safe_float(df.ci_v.quantile(0.25)),
+            "q75_ci_vax":         safe_float(df.ci_v.quantile(0.75)),
+            "q25_ci_pbo":         safe_float(df.ci_p.quantile(0.25)),
+            "q75_ci_pbo":         safe_float(df.ci_p.quantile(0.75)),
+            "q25_cir":            safe_float(df.cir.quantile(0.25)),
+            "q75_cir":            safe_float(df.cir.quantile(0.75)),
+            "q25_ve":             safe_float(df.ve.quantile(0.25)),
+            "q75_ve":             safe_float(df.ve.quantile(0.75)),
+            "ve_2_5pct":          safe_float(ve_lo),
+            "ve_97_5pct":         safe_float(ve_hi),
+            "mean_ci_vax":        safe_float(df.ci_v.mean()),
+            "mean_ci_pbo":        safe_float(df.ci_p.mean()),
+            "mean_cir":           safe_float(df.cir.mean()),
+            "mean_ve":            safe_float(df.ve.mean()),
+            "sd_ci_vax":          safe_float(df.ci_v.std()),
+            "sd_ci_pbo":          safe_float(df.ci_p.std()),
+            "sd_cir":             safe_float(df.cir.std()),
+            "sd_ve":              safe_float(df.ve.std()),
+            "n_runs_nan_ve":      n_nan,
+        },
+    }
+    json_str = json.dumps(run_record, indent=2)
+    ts_now   = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    save_msg     = st.empty()   # placeholder for success / error feedback
+    scol1, scol2 = st.columns(2)
+
+    # Download button — always available, no secrets needed
+    with scol1:
+        st.download_button(
+            label="⬇️  Download results as JSON",
+            data=json_str,
+            file_name=f"ve_run_{ts_now}.json",
+            mime="application/json",
+            use_container_width=True,
+            help="Downloads parameters + summary statistics as a JSON file.",
+        )
+
+    # GitHub save — only if secrets are configured
+    with scol2:
+        if github_configured:
+            if st.button("📤  Save to GitHub repo", use_container_width=True,
+                         help="Saves a timestamped JSON to the results/ folder of your repo."):
+                gh_filename = f"results/run_{ts_now}.json"
+                status_code, resp_data = save_to_github(
+                    run_record, GH_TOKEN, GH_OWNER, GH_REPO, GH_BRANCH, gh_filename
+                )
+                if status_code == 201:
+                    save_msg.success(f"✅ Saved to GitHub: `{gh_filename}`")
+                else:
+                    err = resp_data.get("message", "") if isinstance(resp_data, dict) else str(resp_data)
+                    save_msg.error(
+                        f"❌ GitHub save failed "
+                        f"(HTTP {status_code if status_code else 'connection error'}) — {err}. "
+                        "Check token permissions and repo name in secrets."
+                    )
+        else:
+            with st.expander("ℹ️ Enable GitHub saving — setup instructions"):
+                st.markdown("""
+**Local development** — create `.streamlit/secrets.toml` (add this file to `.gitignore`):
+```toml
+GITHUB_TOKEN  = "ghp_xxxxxxxxxxxxxxxxxxxx"
+GITHUB_OWNER  = "your-github-username"
+GITHUB_REPO   = "your-repo-name"
+GITHUB_BRANCH = "main"
