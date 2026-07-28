@@ -1,7 +1,7 @@
 # Per-Contact Vaccine Efficacy Dashboard — Lab Notebook
 
 **Project start:** July 23, 2026
-**Last updated:** July 24, 2026
+**Last updated:** July 28, 2026
 **Platform:** Python / Streamlit
 **Repository:** Public GitHub repo with GitHub Pages for documentation
 
@@ -219,8 +219,10 @@ Median, 25th percentile, 75th percentile, 2.5th percentile, 97.5th percentile, m
 
 ### Privacy Notes
 
-- Repo and Pages site are currently **public** — appropriate for current content (methodology, formulas, design decisions only)
-- If real trial data or unpublished results are ever added, move to a **separate private repo**
+- Repo is currently **public** — appropriate for current content (methodology, formulas, design decisions only)
+- **Repo visibility does not control Streamlit's own access.** Streamlit Community Cloud needs read access to this repo to build/deploy the app regardless of whether it's public or private — flipping the repo to private only hides it from the general public, it does not additionally protect content from Streamlit's service. (Confirmed July 28, 2026: briefly set the repo to private, which broke the deployed app until reverted, since Streamlit's GitHub integration lost read access — see Session 3 log below.)
+- **The actual safety boundary for future sensitive content is a separate repo.** If real trial data or unpublished results are ever added, they must go in a **new, separate private repo that is never connected to Streamlit (or any other deployment service)** — not just a private flag on *this* repo.
+- Avoid granting Streamlit's GitHub App "all repositories" access on this account; if private-repo hosting is needed later, prefer its "select repositories" option scoped to just the specific repo being deployed (least privilege — an app permission granted to "all repos" also covers unrelated private repos on the account).
 - On the free GitHub plan, GitHub Pages remains public even if the repo is private; private Pages requires GitHub Team plan (~$4/month)
 - For private documentation, use Markdown `.md` files in a private repo — GitHub renders them automatically without Pages, and they stay private when the repo is private
 
@@ -255,6 +257,20 @@ Median, 25th percentile, 75th percentile, 2.5th percentile, 97.5th percentile, m
 - Discussed GitHub Pages privacy model; current public setup is appropriate for current content
 - Discussed future plan: if repo goes private, switch to Markdown-based lab notebook instead of HTML for documentation (renders automatically on GitHub, private when repo is private, no Pages needed)
 - Created this lab notebook (`notebook.md`)
+
+### July 28, 2026 — Session 3
+
+- Added thorough inline comments and docstrings throughout `app.py` explaining exactly what each function and section does, and referencing `requirements.txt`, `notebook/lab-notebook.md`, and `README.md` where relevant
+- Created `README.md` — directory-level overview of what each file is and how they fit together
+- Committed and pushed both changes to GitHub; adopted a new project rule: every commit in this repo notes it was made with Claude Code
+- Tried to view the deployed Streamlit app and found it erroring
+- Diagnosed the cause: the repo had been switched to private (for safety), which broke Streamlit Community Cloud's read access to pull the code — its push webhook still delivered successfully, but that's a separate mechanism from read access, so the deploy failed
+- Discussed the tradeoffs of making the repo public vs. keeping it private and granting Streamlit's GitHub App access to only this repo vs. to all repos (public and private) on the account
+- Key realization: repo visibility (public/private) and Streamlit's read access are separate axes — Streamlit needs read access either way to deploy, so a private flag on *this* repo does not protect any sensitive content added to *this* repo from Streamlit's service. It only hides the repo from the general public.
+- **Decision: reverted the repo back to public.** Given the above, keeping it private bought no extra protection for future sensitive content in this same repo, so simplicity won out.
+- **New policy adopted:** any real trial data or unpublished/sensitive results added in the future must live in a separate, private repo that is never connected to Streamlit or any other deployment service — not just toggled private within this repo. Also decided against ever granting Streamlit's GitHub App "all repositories" access, to avoid exposing unrelated private repos on the account for the sake of one deployed app.
+- Updated the notebook's "Privacy Notes" section (§6) to capture this reasoning for future reference
+- Renamed this file from `7-27-26-notebook.md` to `lab-notebook.md`, to make clear it's a single running notebook rather than a per-date file
 
 ---
 

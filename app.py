@@ -14,7 +14,7 @@ is no separate model/view split. Related files in this directory:
 
     requirements.txt            Python dependencies needed to run this app
                                  (streamlit, numpy, pandas, matplotlib).
-    notebook/7-27-26-notebook.md  Lab notebook: full write-up of the model
+    notebook/lab-notebook.md     Lab notebook: full write-up of the model
                                  structure, every modeling assumption, the
                                  reasoning behind each design decision below,
                                  and a session-by-session change log. Read
@@ -54,7 +54,7 @@ ACTIVE_LABELS = ["0–1", "2–5", "6–10", "11–50", ">50"]
 N_PERIODS     = 4
 # Default population split across the six buckets above, used to seed the
 # per-arm count inputs the first time the app loads (or on Reset). These
-# mirror the "Default Proportion" column in notebook/7-27-26-notebook.md §2.
+# mirror the "Default Proportion" column in notebook/lab-notebook.md §2.
 DEFAULT_PROPS = [0.01, 0.15, 0.20, 0.50, 0.10, 0.04]
 # The three strategies a user can pick (independently per arm) for what to do
 # with people who have no reported partner-count bucket. See notebook §4
@@ -345,7 +345,7 @@ with right:
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Assumptions — static reference table shown to the user in-app.
-# Mirrors notebook/7-27-26-notebook.md §3 "Model Assumptions" verbatim;
+# Mirrors notebook/lab-notebook.md §3 "Model Assumptions" verbatim;
 # update both places together if an assumption changes.
 # ─────────────────────────────────────────────────────────────────────────────
 with st.expander("📌 Model Assumptions"):
