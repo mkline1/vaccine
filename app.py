@@ -1,8 +1,38 @@
+"""
+app.py — Per-Contact Vaccine Efficacy (VE) Dashboard
+=====================================================
+
+A Streamlit web app that Monte Carlo-simulates a two-arm (vaccinated vs.
+placebo) HIV/STI-style prevention trial, to explore how a per-contact
+vaccine efficacy (V) — the reduction in transmission probability on any
+single sexual contact — translates into the trial-level efficacy that
+would actually be observed (VE = 1 - CIR, where CIR is the cumulative
+incidence ratio between arms).
+
+This file contains all simulation logic and all UI code for the app; there
+is no separate model/view split. Related files in this directory:
+
+    requirements.txt            Python dependencies needed to run this app
+                                 (streamlit, numpy, pandas, matplotlib).
+    notebook/7-27-26-notebook.md  Lab notebook: full write-up of the model
+                                 structure, every modeling assumption, the
+                                 reasoning behind each design decision below,
+                                 and a session-by-session change log. Read
+                                 it for the "why" behind anything that looks
+                                 like an arbitrary choice in this file.
+    README.md                   Directory-level overview: what each file is
+                                 and how they fit together.
+
+Run locally with:  streamlit run app.py
+"""
+
 import streamlit as st
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Page setup — must be the first Streamlit call in the script.
 # ─────────────────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Per-Contact VE Dashboard", layout="wide")
 st.title("🔬 Per-Contact Vaccine Efficacy Dashboard")
@@ -14,10 +44,21 @@ st.markdown(
 # ─────────────────────────────────────────────────────────────────────────────
 # Constants
 # ─────────────────────────────────────────────────────────────────────────────
+# All six partner-count buckets, including "Missing" — used for the per-arm
+# input panels where a person must be assigned to exactly one of these.
 BUCKET_LABELS = ["0–1", "2–5", "6–10", "11–50", ">50", "Missing"]
+# The five buckets people are actually simulated in, after "Missing" has been
+# redistributed away (see get_adjusted_props below). Used for plot axis labels.
 ACTIVE_LABELS = ["0–1", "2–5", "6–10", "11–50", ">50"]
+# Trial duration: 4 six-month follow-up periods = 2 years total.
 N_PERIODS     = 4
+# Default population split across the six buckets above, used to seed the
+# per-arm count inputs the first time the app loads (or on Reset). These
+# mirror the "Default Proportion" column in notebook/7-27-26-notebook.md §2.
 DEFAULT_PROPS = [0.01, 0.15, 0.20, 0.50, 0.10, 0.04]
+# The three strategies a user can pick (independently per arm) for what to do
+# with people who have no reported partner-count bucket. See notebook §4
+# "Missing Data" for the rationale for offering all three.
 MISSING_OPTS  = [
     "Redistribute evenly across buckets",
     "All → highest risk (>50)",
@@ -29,6 +70,17 @@ MISSING_OPTS  = [
 # Core helpers
 # ─────────────────────────────────────────────────────────────────────────────
 def default_counts(n, props=None):
+    """
+    Convert a set of bucket proportions into integer head-counts that sum
+    exactly to n (used to populate/reset the per-arm number inputs).
+
+    Rounding each proportion independently can leave the total off by a
+    person or two, so any leftover/deficit (`diff`) is dumped entirely into
+    whichever of the five *active* buckets (indices 0-4; "Missing" at index
+    5 is deliberately excluded) already has the largest count — this keeps
+    the correction small in relative terms since it lands on the biggest
+    bucket.
+    """
     if props is None:
         props = DEFAULT_PROPS
     counts = [int(round(n * p)) for p in props]
@@ -40,6 +92,17 @@ def default_counts(n, props=None):
 
 
 def get_adjusted_props(counts_6, mode):
+    """
+    Fold the "Missing" bucket's head-count into the five active buckets
+    according to the chosen strategy, then normalize to proportions that
+    sum to 1. This is what run_one_simulation actually samples from — the
+    simulation never draws anyone into "Missing" directly.
+
+    mode: one of the three strings in MISSING_OPTS.
+        "Redistribute evenly across buckets" -> split missing count 5 ways
+        "All → highest risk (>50)"           -> all missing added to bucket 4
+        "All → lowest risk (0–1)"            -> all missing added to bucket 0
+    """
     c    = [float(x) for x in counts_6[:5]]
     miss = float(counts_6[5])
     if   mode == "Redistribute evenly across buckets": c = [x + miss / 5 for x in c]
@@ -54,46 +117,82 @@ def run_one_simulation(
     bucket_ranges, p_ci, p_t, V,
     n_periods=N_PERIODS, rng=None,
 ):
+    """
+    Simulate a single trial replicate over n_periods six-month periods and
+    return per-arm infection totals plus per-bucket breakdowns.
+
+    For each arm, every person is assigned once to a partner-count bucket
+    (weighted by that arm's `*_props`), then in every period every person
+    still uninfected draws a fresh partner count uniformly from their
+    bucket's [low, high] range and faces one Bernoulli trial for infection
+    with probability 1 - (1 - p_per_contact)^partners. Once infected, a
+    person is permanently removed from the at-risk pool for all later
+    periods (no reinfection is modeled — see notebook §3, assumption 6).
+
+    p_per_contact is p_ci * p_t for placebo and p_ci * p_t * (1 - V) for
+    vaccinated, i.e. V multiplicatively reduces per-contact transmission
+    risk (notebook §3, assumption 7).
+
+    Returns:
+        (total infected in vax arm, total infected in placebo arm,
+         infections-by-bucket for vax, infections-by-bucket for placebo,
+         population-by-bucket for vax, population-by-bucket for placebo)
+    """
     if rng is None:
         rng = np.random.default_rng()
 
     n_b = len(bucket_ranges)
-    bl  = np.array([r[0] for r in bucket_ranges])
-    bh  = np.array([r[1] for r in bucket_ranges])
-    bs  = bh - bl + 1
+    bl  = np.array([r[0] for r in bucket_ranges])   # per-bucket lower bound
+    bh  = np.array([r[1] for r in bucket_ranges])   # per-bucket upper bound
+    bs  = bh - bl + 1                                # per-bucket range width
 
+    # One-time bucket assignment per person, fixed for the whole trial
+    # (notebook §3, assumption 4).
     vax_b = rng.choice(n_b, size=N_vax,     p=vax_props)
     pbo_b = rng.choice(n_b, size=N_placebo, p=pbo_props)
 
-    vax_inf = np.zeros(N_vax,     dtype=bool)
-    pbo_inf = np.zeros(N_placebo, dtype=bool)
+    vax_inf = np.zeros(N_vax,     dtype=bool)   # ever-infected flag, vax arm
+    pbo_inf = np.zeros(N_placebo, dtype=bool)   # ever-infected flag, placebo arm
 
     for _ in range(n_periods):
+        # Process both arms identically each period, just with a different
+        # per-contact infection probability (vaccinated gets the (1-V) factor).
         for inf_arr, b_arr, p_per in [
             (vax_inf, vax_b, p_ci * p_t * (1.0 - V)),
             (pbo_inf, pbo_b, p_ci * p_t),
         ]:
-            mask = ~inf_arr
+            mask = ~inf_arr          # only still-at-risk people participate
             n    = int(mask.sum())
             if not n:
                 continue
             b        = b_arr[mask]
+            # Fresh Discrete Uniform[bl, bh] partner-count draw for this period
+            # (notebook §3, assumption 5): bl + floor(U(0,1) * range_width).
             partners = bl[b] + (rng.random(n) * bs[b]).astype(int)
             p_inf    = 1.0 - (1.0 - p_per) ** partners
-            inf_arr[mask] = rng.random(n) < p_inf
+            inf_arr[mask] = rng.random(n) < p_inf   # single Bernoulli draw per person
 
-    vax_bi = np.array([np.sum(vax_inf & (vax_b == k)) for k in range(n_b)])
-    pbo_bi = np.array([np.sum(pbo_inf & (pbo_b == k)) for k in range(n_b)])
-    vax_bn = np.bincount(vax_b, minlength=n_b)
-    pbo_bn = np.bincount(pbo_b, minlength=n_b)
+    # Tally outcomes by bucket for the per-bucket figures/tables.
+    vax_bi = np.array([np.sum(vax_inf & (vax_b == k)) for k in range(n_b)])  # infections per bucket, vax
+    pbo_bi = np.array([np.sum(pbo_inf & (pbo_b == k)) for k in range(n_b)])  # infections per bucket, placebo
+    vax_bn = np.bincount(vax_b, minlength=n_b)   # population per bucket, vax
+    pbo_bn = np.bincount(pbo_b, minlength=n_b)   # population per bucket, placebo
 
     return int(vax_inf.sum()), int(pbo_inf.sum()), vax_bi, pbo_bi, vax_bn, pbo_bn
 
 
 def bar_with_iqr(ax, x_pos, medians, q25, q75, color, label, width=0.35):
+    """
+    Draw one grouped bar series (e.g. one arm) on `ax` at x-positions
+    `x_pos`, bar height = median across simulation runs, with an error bar
+    spanning the 25th-75th percentile (IQR) across runs. Used throughout
+    Figure 2 to show run-to-run variability alongside the central estimate.
+    """
     ax.bar(x_pos, medians, width, color=color, alpha=0.85, label=label)
     ax.errorbar(
         x_pos, medians,
+        # np.clip guards against floating-point cases where q25/q75 could
+        # fall marginally on the wrong side of the median.
         yerr=[np.clip(medians - q25, 0, None), np.clip(q75 - medians, 0, None)],
         fmt="none", color=color, capsize=3, lw=1.2, alpha=0.9,
     )
@@ -102,6 +201,11 @@ def bar_with_iqr(ax, x_pos, medians, q25, q75, color, label, width=0.35):
 # ─────────────────────────────────────────────────────────────────────────────
 # Session-state init (once on first load)
 # ─────────────────────────────────────────────────────────────────────────────
+# Seed Streamlit's session_state with default per-bucket counts (N=500 each
+# arm) so the per-arm number_input widgets below have starting values on
+# first render. This only runs once per session — subsequent reruns (e.g.
+# from moving a slider) keep whatever the user has typed, since the keys
+# already exist in session_state.
 for _pfx in ("vax", "pbo"):
     if f"{_pfx}_0" not in st.session_state:
         for _i, _c in enumerate(default_counts(500)):
@@ -109,10 +213,12 @@ for _pfx in ("vax", "pbo"):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Sidebar
+# Sidebar — all simulation-wide parameters live here
 # ─────────────────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("Population")
+    # Total trial size and the vaccinated/placebo split; placebo N is derived
+    # so the two always sum to the total.
     N_tot     = int(st.number_input("Total N",          value=1000, min_value=2, step=100))
     N_vax     = int(st.number_input("Vaccinated N_vax", value=500,  min_value=1,
                                      max_value=N_tot - 1, step=50))
@@ -122,14 +228,25 @@ with st.sidebar:
     st.divider()
 
     st.header(">50 Bucket Bounds")
+    # The highest-activity bucket has no natural upper bound, so its range
+    # is user-configurable rather than hardcoded (notebook §4, "The >50
+    # Bucket") — the choice of upper bound has an outsized effect on that
+    # bucket's cumulative incidence (see Figure 3).
     sc1, sc2 = st.columns(2)
     upper_lo = int(sc1.number_input("Lower", value=51,  min_value=51))
     upper_hi = int(sc2.number_input("Upper", value=100, min_value=upper_lo + 1, step=10))
+    # (low, high) ranges for all 5 active buckets, in bucket-index order —
+    # consumed directly by run_one_simulation.
     bucket_ranges = [(0, 1), (2, 5), (6, 10), (11, 50), (upper_lo, upper_hi)]
 
     st.divider()
 
     st.header("Transmission Parameters")
+    # p_ci: probability a given contact is infected.
+    # p_t:  probability of transmission given contact with an infected person.
+    # V:    per-contact vaccine efficacy — multiplicatively reduces the
+    #       vaccinated arm's per-contact transmission probability (p_ci * p_t)
+    #       by a factor of (1 - V).
     p_ci = st.slider("P(contact infected)",         0.0, 1.0, 0.03, 0.01, format="%.2f")
     p_t  = st.slider("P(transmission | infected)",  0.0, 1.0, 0.50, 0.05, format="%.2f")
     V    = st.slider("VE per contact (V)",           0.0, 1.0, 0.00, 0.05, format="%.2f")
@@ -139,6 +256,8 @@ with st.sidebar:
     st.divider()
 
     st.header("Simulation")
+    # How many independent trial replicates to run, and the RNG seed shared
+    # across all of them (for reproducibility given identical inputs).
     n_runs  = int(st.number_input("Runs",        value=100, min_value=1, max_value=2000, step=50))
     seed    = int(st.number_input("Random seed", value=42,  min_value=0))
     run_btn = st.button("▶  Run Simulation", type="primary", use_container_width=True)
@@ -148,16 +267,38 @@ with st.sidebar:
 # Per-arm distribution panel
 # ─────────────────────────────────────────────────────────────────────────────
 def dist_panel(prefix, title, n_target, miss_key):
+    """
+    Render one arm's editable partner-count distribution panel: six integer
+    inputs (one per bucket in BUCKET_LABELS), a live running total with a
+    validity check against n_target, a proportion table, a Reset-to-defaults
+    button, and the missing-data-handling selector for this arm.
+
+    prefix:   "vax" or "pbo" — used as the session_state key prefix so each
+              arm's inputs are independent widgets.
+    title:    panel heading shown to the user.
+    n_target: the head-count this arm's buckets must sum to (N_vax or
+              N_placebo) before the Run button will accept it.
+    miss_key: session_state key for this arm's missing-data selectbox.
+
+    Returns: (counts, miss_mode, is_valid) — the six raw bucket counts, the
+    chosen missing-data strategy, and whether counts currently sum to
+    n_target.
+    """
     hcol, bcol = st.columns([5, 1])
     hcol.subheader(title)
     if bcol.button("↺ Reset", key=f"reset_{prefix}",
                    help=f"Reset to defaults for N = {n_target:,}"):
+        # Overwrite this arm's session_state entries with fresh defaults
+        # sized to the current target N, then force a rerun so the number
+        # inputs immediately reflect the reset values.
         for i, c in enumerate(default_counts(n_target)):
             st.session_state[f"{prefix}_{i}"] = c
         st.rerun()
 
     st.caption(f"Target: **{n_target:,}** · step ±1 or type · all 6 must sum to target")
 
+    # One number_input per bucket; each is bound to its own session_state
+    # key so edits persist across reruns (e.g. when the other arm changes).
     cols   = st.columns(6)
     counts = [
         int(cols[i].number_input(lbl, min_value=0, step=1, key=f"{prefix}_{i}"))
@@ -168,6 +309,8 @@ def dist_panel(prefix, title, n_target, miss_key):
     diff     = total - n_target
     is_valid = diff == 0
 
+    # Immediate feedback on whether this arm's counts are usable — the Run
+    # button is gated on both arms being valid (see "if run_btn:" below).
     if is_valid:
         st.success(f"Total: {total:,} / {n_target:,}  ✓")
     elif diff > 0:
@@ -175,6 +318,8 @@ def dist_panel(prefix, title, n_target, miss_key):
     else:
         st.error(f"Total: {total:,} / {n_target:,}  — {abs(diff)} under  ← fix before running")
 
+    # Live proportion table (raw counts / raw total — this is *before* the
+    # missing-data redistribution applied by get_adjusted_props).
     denom   = total if total else 1
     prop_df = pd.DataFrame({
         "Bucket":     BUCKET_LABELS,
@@ -188,7 +333,7 @@ def dist_panel(prefix, title, n_target, miss_key):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Distribution panels
+# Distribution panels — one per arm, side by side
 # ─────────────────────────────────────────────────────────────────────────────
 st.header("Partner Count Distributions")
 left, right = st.columns(2)
@@ -199,7 +344,9 @@ with right:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Assumptions
+# Assumptions — static reference table shown to the user in-app.
+# Mirrors notebook/7-27-26-notebook.md §3 "Model Assumptions" verbatim;
+# update both places together if an assumption changes.
 # ─────────────────────────────────────────────────────────────────────────────
 with st.expander("📌 Model Assumptions"):
     st.markdown("""
@@ -219,55 +366,73 @@ with st.expander("📌 Model Assumptions"):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Run simulation
+# Run simulation — everything below only executes after the button is clicked
+# (Streamlit reruns the whole script top-to-bottom on every interaction, so
+# `run_btn` is only True on the rerun triggered by that specific click).
 # ─────────────────────────────────────────────────────────────────────────────
 if run_btn:
+    # Gate: both arms' bucket counts must sum exactly to their target N
+    # before we can build valid sampling proportions.
     if not vax_ok or not pbo_ok:
         if not vax_ok: st.error("❌ Vaccinated group counts do not sum to N_vax")
         if not pbo_ok: st.error("❌ Placebo group counts do not sum to N_placebo")
         st.stop()
 
+    # Fold each arm's "Missing" bucket into the five active buckets per that
+    # arm's chosen strategy, producing the 5-length probability vectors that
+    # run_one_simulation samples bucket assignment from.
     vax_props = get_adjusted_props(vax_counts, vax_miss)
     pbo_props = get_adjusted_props(pbo_counts, pbo_miss)
 
+    # Single shared RNG, seeded once, threaded through every replicate below
+    # so the whole batch of n_runs simulations is reproducible from `seed`.
     rng     = np.random.default_rng(seed)
     results = []
     vax_bi_all, pbo_bi_all = [], []
     vax_bn_all, pbo_bn_all = [], []
 
+    # ── Monte Carlo loop: run the trial n_runs independent times ───────────
     prog = st.progress(0, text="Running simulations…")
     for i in range(n_runs):
         nvi, npi, vbi, pbi, vbn, pbn = run_one_simulation(
             N_vax, N_placebo, vax_props, pbo_props,
             bucket_ranges, p_ci, p_t, V, rng=rng,
         )
-        ci_v = nvi / N_vax
-        ci_p = npi / N_placebo
-        cir  = (ci_v / ci_p) if ci_p > 0 else np.nan
+        ci_v = nvi / N_vax                       # cumulative incidence, vax arm
+        ci_p = npi / N_placebo                   # cumulative incidence, placebo arm
+        cir  = (ci_v / ci_p) if ci_p > 0 else np.nan   # cumulative incidence ratio
         results.append(dict(
             n_vax=nvi, n_pbo=npi,
             ci_v=ci_v, ci_p=ci_p,
-            cir=cir,   ve=1.0 - cir,
+            cir=cir,   ve=1.0 - cir,             # VE = 1 - CIR, this replicate's estimate
         ))
         vax_bi_all.append(vbi);  pbo_bi_all.append(pbi)
         vax_bn_all.append(vbn);  pbo_bn_all.append(pbn)
         prog.progress((i + 1) / n_runs)
     prog.empty()
 
+    # One row per replicate: n_vax, n_pbo, ci_v, ci_p, cir, ve.
     df     = pd.DataFrame(results)
-    vax_bi = np.array(vax_bi_all)
-    pbo_bi = np.array(pbo_bi_all)
-    vax_bn = np.array(vax_bn_all)
-    pbo_bn = np.array(pbo_bn_all)
+    # Each array below is shaped (n_runs, n_buckets) — one row per replicate.
+    vax_bi = np.array(vax_bi_all)   # infections per bucket, per replicate, vax
+    pbo_bi = np.array(pbo_bi_all)   # infections per bucket, per replicate, placebo
+    vax_bn = np.array(vax_bn_all)   # population per bucket, per replicate, vax
+    pbo_bn = np.array(pbo_bn_all)   # population per bucket, per replicate, placebo
 
+    # Derived per-bucket metrics, computed across all replicates at once.
+    # np.errstate + np.where(... > 0, ...) avoids 0/0 warnings for buckets
+    # that happen to be empty in a given replicate.
     with np.errstate(divide="ignore", invalid="ignore"):
-        vax_ci_bucket = np.where(vax_bn > 0, vax_bi / vax_bn, np.nan)
-        pbo_ci_bucket = np.where(pbo_bn > 0, pbo_bi / pbo_bn, np.nan)
-        vax_tot = vax_bi.sum(axis=1, keepdims=True)
-        pbo_tot = pbo_bi.sum(axis=1, keepdims=True)
-        vax_pct = np.where(vax_tot > 0, vax_bi / vax_tot, np.nan)
-        pbo_pct = np.where(pbo_tot > 0, pbo_bi / pbo_tot, np.nan)
+        vax_ci_bucket = np.where(vax_bn > 0, vax_bi / vax_bn, np.nan)   # cum. incidence within bucket, vax
+        pbo_ci_bucket = np.where(pbo_bn > 0, pbo_bi / pbo_bn, np.nan)   # cum. incidence within bucket, placebo
+        vax_tot = vax_bi.sum(axis=1, keepdims=True)                    # total infections that replicate, vax
+        pbo_tot = pbo_bi.sum(axis=1, keepdims=True)                    # total infections that replicate, placebo
+        vax_pct = np.where(vax_tot > 0, vax_bi / vax_tot, np.nan)      # bucket's share of all vax infections
+        pbo_pct = np.where(pbo_tot > 0, pbo_bi / pbo_tot, np.nan)      # bucket's share of all placebo infections
 
+    # A replicate where the placebo arm had zero infections makes CIR/VE
+    # undefined (division by zero) — flag and exclude rather than silently
+    # dropping via NaN-aware functions with no explanation.
     n_nan = int(df.ve.isna().sum())
     ve_lo = float(df.ve.quantile(0.025))
     ve_hi = float(df.ve.quantile(0.975))
@@ -279,6 +444,9 @@ if run_btn:
         )
 
     # ── Top-line metrics ──────────────────────────────────────────────────────
+    # Medians (not means) are used throughout as the headline statistic,
+    # since CIR can be right-skewed at N=500/arm — see notebook §4
+    # "Summary Statistics" for the rationale.
     st.header("Results")
 
     def iqr_str(s):
@@ -295,9 +463,13 @@ if run_btn:
     m4.caption(f"95% sim. interval: [{ve_lo:.3f}, {ve_hi:.3f}]")
 
     # ── Figure 1: Simulation outcome distributions ─────────────────────────────
+    # Three histograms, each summarizing one metric's spread across the
+    # n_runs replicates: VE, both arms' cumulative incidence overlaid, CIR.
     st.subheader("Simulation Outcome Distributions")
     fig1, axes1 = plt.subplots(1, 3, figsize=(15, 4))
 
+    # Left panel: distribution of VE across replicates, with median and the
+    # 2.5th/97.5th percentile simulation interval marked.
     ax = axes1[0]
     ax.hist(df.ve.dropna(), bins=30, color="steelblue", edgecolor="white", lw=0.5)
     ax.axvline(df.ve.median(), color="red",    ls="--", lw=1.5,
@@ -310,6 +482,8 @@ if run_btn:
     ax.set_xlabel("Vaccine Efficacy"); ax.set_ylabel("Count")
     ax.legend(fontsize=8)
 
+    # Centre panel: cumulative incidence for both arms overlaid, each with
+    # its own median line, to visualize the separation CIR is computed from.
     ax = axes1[1]
     ax.hist(df.ci_v, bins=30, color="steelblue", alpha=0.7,
             edgecolor="white", label="Vaccinated")
@@ -323,6 +497,8 @@ if run_btn:
     ax.set_xlabel("Proportion Infected"); ax.set_ylabel("Count")
     ax.legend(fontsize=8)
 
+    # Right panel: CIR distribution with the null (CIR=1, no vaccine effect)
+    # and the observed median marked for reference.
     ax = axes1[2]
     ax.hist(df.cir.dropna(), bins=30, color="mediumseagreen",
             edgecolor="white", lw=0.5)
@@ -336,9 +512,12 @@ if run_btn:
 
     plt.tight_layout()
     st.pyplot(fig1)
-    plt.close(fig1)
+    plt.close(fig1)   # release the figure so repeated runs don't leak memory
 
     # ── Figure 2: Infections by bucket ─────────────────────────────────────────
+    # Shows, per active bucket, how infections are distributed across the
+    # risk buckets — illustrating that high-activity buckets can drive a
+    # disproportionate share of infections even as a small share of N.
     st.subheader("Infections by Partner Count Bucket")
     st.caption("Medians across simulation runs; error bars = IQR (25th–75th percentile).")
 
@@ -346,6 +525,7 @@ if run_btn:
     x = np.arange(5)
     w = 0.35
 
+    # Left: raw infection counts per bucket (vax vs. placebo, grouped bars).
     ax = axes2[0]
     bar_with_iqr(
         ax, x - w/2, np.median(vax_bi, 0),
@@ -361,6 +541,8 @@ if run_btn:
     ax.set_xlabel("Partner Count Bucket"); ax.set_ylabel("Infections (n)")
     ax.set_title("Median Infections per Bucket"); ax.legend()
 
+    # Centre: cumulative incidence *within* each bucket (infections / bucket
+    # population) — shows risk concentration independent of bucket size.
     ax = axes2[1]
     bar_with_iqr(
         ax, x - w/2, np.nanmedian(vax_ci_bucket, 0),
@@ -376,6 +558,9 @@ if run_btn:
     ax.set_xlabel("Partner Count Bucket"); ax.set_ylabel("Proportion Infected")
     ax.set_title("Median Cumulative Incidence per Bucket"); ax.legend()
 
+    # Right: each bucket's share of that arm's *total* infections — the key
+    # illustration that a small high-activity bucket can account for a large
+    # fraction of all trial infections.
     ax = axes2[2]
     bar_with_iqr(
         ax, x - w/2, np.nanmedian(vax_pct, 0),
@@ -398,6 +583,9 @@ if run_btn:
     plt.close(fig2)
 
     # ── Figure 3: Within >50 bucket detail ────────────────────────────────────
+    # Zooms into the user-configurable >50 bucket to show why its upper
+    # bound matters: total contacts across the 4 periods vary widely even
+    # within this one bucket, and cumulative incidence rises steeply with it.
     st.subheader(">50 Partner Bucket: Within-Bucket Detail")
     st.caption(
         f"**Left:** distribution of total partners across all 4 periods for a person "
@@ -407,15 +595,25 @@ if run_btn:
     )
 
     fig3, axes3 = plt.subplots(1, 2, figsize=(12, 4))
+    # Fixed seed (0) here is intentional and independent of the sidebar
+    # `seed` — this panel is an analytical/illustrative view of the >50
+    # bucket in isolation, not part of the n_runs Monte Carlo batch above,
+    # so it stays deterministic regardless of what seed the user picks.
     rng_vis  = np.random.default_rng(0)
     n_vis    = 200_000
     span_b4  = upper_hi - upper_lo + 1
+    # Sum of 4 independent Discrete Uniform[upper_lo, upper_hi] draws — the
+    # total partners a >50-bucket person would accumulate over the full
+    # 2-year trial (ignoring the possibility they were infected partway
+    # through, which is what makes this "theoretical" rather than
+    # simulation-derived).
     tot_part = np.sum(
         upper_lo + np.floor(rng_vis.random((n_vis, N_PERIODS)) * span_b4).astype(int),
         axis=1,
     )
     med_tot = int(np.median(tot_part))
 
+    # Left: density histogram of that total-partners distribution.
     ax = axes3[0]
     ax.hist(tot_part, bins=min(100, span_b4 * N_PERIODS),
             color="mediumpurple", edgecolor="white", lw=0.3, density=True)
@@ -425,6 +623,10 @@ if run_btn:
     ax.set_title(f"Distribution of Total Partners\n(>50 bucket: {upper_lo}–{upper_hi} per period)")
     ax.legend(fontsize=8)
 
+    # Right: exact (closed-form, not sampled) cumulative incidence curve
+    # 1 - (1 - p_per_contact)^t as a function of total partner count t, for
+    # both arms — shows how steeply risk climbs across the >50 bucket's
+    # possible total-contact range.
     t_range = np.arange(N_PERIODS * upper_lo, N_PERIODS * upper_hi + 1)
     ax = axes3[1]
     ax.plot(t_range, 1.0 - (1.0 - p_ci * p_t) ** t_range,
@@ -444,6 +646,8 @@ if run_btn:
     plt.close(fig3)
 
     # ── Summary table ──────────────────────────────────────────────────────────
+    # Full numeric summary (median, quartiles, 95% simulation interval,
+    # mean, SD) for the four headline metrics, across all replicates.
     st.subheader("Summary Statistics (across simulation runs)")
     cols_o = ("ci_v", "ci_p", "cir", "ve")
     summary = pd.DataFrame({
@@ -461,6 +665,9 @@ if run_btn:
         use_container_width=True,
     )
 
+    # Two collapsed-by-default detail tables, for users who want the raw
+    # per-bucket numbers behind Figure 2 and the actual sampling proportions
+    # behind this run (post missing-data redistribution).
     with st.expander("Per-bucket infection detail (medians across runs)"):
         bk_df = pd.DataFrame({
             "Bucket":                        ACTIVE_LABELS,
