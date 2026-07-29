@@ -9,6 +9,14 @@ single sexual contact — translates into the trial-level efficacy that
 would actually be observed (VE = 1 - CIR, where CIR is the cumulative
 incidence ratio between arms).
 
+Two simulation modes are offered (toggle at the top of the page): setting
+each arm's partner-count distribution independently ("Manual Arm
+Distributions", to explore deliberate/hypothetical imbalance), or defining
+one pooled population distribution and letting the app randomly split it
+into arms each replicate ("Randomized Single Population", to explore how
+much chance imbalance from randomization noise alone — with no deliberate
+difference between arms — can affect the observed trial result).
+
 This file contains all simulation logic and all UI code for the app; there
 is no separate model/view split. Related files in this directory:
 
@@ -40,6 +48,30 @@ st.markdown(
     "Simulate **VE = 1 − CIR** over 4 six-month periods (2 years). "
     "Set partner-count distributions per arm, then hit **▶ Run Simulation**."
 )
+
+# Mode is read once, near the top, before the sidebar and distribution
+# panels below — both branch on this same value for the rest of the script.
+mode = st.radio(
+    "Simulation Mode",
+    ["Manual Arm Distributions", "Randomized Single Population"],
+    horizontal=True,
+    help=(
+        "Manual: set each arm's partner-count distribution independently, to "
+        "explore hypothetical or deliberate imbalance between arms. "
+        "Randomized: define one population-level distribution, then let the "
+        "app randomly split that population into arms — like the "
+        "randomization step of a real trial — so the two arms' realized "
+        "compositions can differ purely by chance, especially at small N."
+    ),
+)
+if mode == "Randomized Single Population":
+    st.caption(
+        "🎲 One pooled population distribution is defined below. Each "
+        "simulation replicate draws every person's partner-count bucket from "
+        "that distribution, shuffles the whole population, and assigns the "
+        "first N_vax people to the vaccinated arm (the rest become placebo) "
+        "— mirroring how a real trial randomizes recruits into arms."
+    )
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Constants
@@ -181,6 +213,77 @@ def run_one_simulation(
     return int(vax_inf.sum()), int(pbo_inf.sum()), vax_bi, pbo_bi, vax_bn, pbo_bn
 
 
+def run_one_simulation_randomized(
+    N_vax, N_placebo, pop_props,
+    bucket_ranges, p_ci, p_t, V,
+    n_periods=N_PERIODS, rng=None,
+):
+    """
+    Simulate a single trial replicate where arm membership is itself
+    randomized, rather than each arm having its own fixed distribution.
+
+    Every person in the pooled population (N_vax + N_placebo) is first
+    assigned a partner-count bucket from the single population-level
+    distribution `pop_props`. The population is then shuffled and split —
+    the first N_vax people (in shuffled order) become the vaccinated arm,
+    the rest become placebo — mirroring block randomization in a real
+    trial. Unlike run_one_simulation, the two arms' bucket compositions are
+    not drawn independently: they emerge from randomly partitioning one
+    shared population, so by chance they can differ, especially at small N.
+
+    Everything downstream of the arm split (the per-period infection
+    process) is identical to run_one_simulation, and the return shape
+    matches it exactly so both feed the same results-rendering code:
+        (total infected in vax arm, total infected in placebo arm,
+         infections-by-bucket for vax, infections-by-bucket for placebo,
+         population-by-bucket for vax, population-by-bucket for placebo)
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+
+    N_tot = N_vax + N_placebo
+    n_b   = len(bucket_ranges)
+    bl    = np.array([r[0] for r in bucket_ranges])
+    bh    = np.array([r[1] for r in bucket_ranges])
+    bs    = bh - bl + 1
+
+    # One pooled bucket draw for the whole population, from the single
+    # population-level distribution.
+    pop_b = rng.choice(n_b, size=N_tot, p=pop_props)
+
+    # Shuffle-and-split: randomly permute the population, then the first
+    # N_vax become vaccinated and the remainder become placebo. This is
+    # the only mechanism (besides the infection process itself) by which
+    # the two arms' realized bucket compositions can differ.
+    perm  = rng.permutation(N_tot)
+    vax_b = pop_b[perm[:N_vax]]
+    pbo_b = pop_b[perm[N_vax:]]
+
+    vax_inf = np.zeros(N_vax,     dtype=bool)
+    pbo_inf = np.zeros(N_placebo, dtype=bool)
+
+    for _ in range(n_periods):
+        for inf_arr, b_arr, p_per in [
+            (vax_inf, vax_b, p_ci * p_t * (1.0 - V)),
+            (pbo_inf, pbo_b, p_ci * p_t),
+        ]:
+            mask = ~inf_arr
+            n    = int(mask.sum())
+            if not n:
+                continue
+            b        = b_arr[mask]
+            partners = bl[b] + (rng.random(n) * bs[b]).astype(int)
+            p_inf    = 1.0 - (1.0 - p_per) ** partners
+            inf_arr[mask] = rng.random(n) < p_inf
+
+    vax_bi = np.array([np.sum(vax_inf & (vax_b == k)) for k in range(n_b)])
+    pbo_bi = np.array([np.sum(pbo_inf & (pbo_b == k)) for k in range(n_b)])
+    vax_bn = np.bincount(vax_b, minlength=n_b)
+    pbo_bn = np.bincount(pbo_b, minlength=n_b)
+
+    return int(vax_inf.sum()), int(pbo_inf.sum()), vax_bi, pbo_bi, vax_bn, pbo_bn
+
+
 def bar_with_iqr(ax, x_pos, medians, q25, q75, color, label, width=0.35):
     """
     Draw one grouped bar series (e.g. one arm) on `ax` at x-positions
@@ -201,14 +304,14 @@ def bar_with_iqr(ax, x_pos, medians, q25, q75, color, label, width=0.35):
 # ─────────────────────────────────────────────────────────────────────────────
 # Session-state init (once on first load)
 # ─────────────────────────────────────────────────────────────────────────────
-# Seed Streamlit's session_state with default per-bucket counts (N=500 each
-# arm) so the per-arm number_input widgets below have starting values on
-# first render. This only runs once per session — subsequent reruns (e.g.
-# from moving a slider) keep whatever the user has typed, since the keys
-# already exist in session_state.
-for _pfx in ("vax", "pbo"):
+# Seed Streamlit's session_state with default per-bucket counts (500 each for
+# the vax/placebo arms, 1000 for the pooled population) so the number_input
+# widgets below have starting values on first render. This only runs once
+# per session — subsequent reruns (e.g. from moving a slider) keep whatever
+# the user has typed, since the keys already exist in session_state.
+for _pfx, _default_n in (("vax", 500), ("pbo", 500), ("pop", 1000)):
     if f"{_pfx}_0" not in st.session_state:
-        for _i, _c in enumerate(default_counts(500)):
+        for _i, _c in enumerate(default_counts(_default_n)):
             st.session_state[f"{_pfx}_{_i}"] = _c
 
 
@@ -252,6 +355,33 @@ with st.sidebar:
     V    = st.slider("VE per contact (V)",           0.0, 1.0, 0.00, 0.05, format="%.2f")
     st.caption(f"Placebo per-contact P: **{p_ci * p_t:.4f}**")
     st.caption(f"Vax per-contact P:     **{p_ci * p_t * (1 - V):.4f}**")
+
+    if mode == "Randomized Single Population":
+        st.divider()
+        st.header("Randomized Population Analysis")
+        # A replicate counts as showing "an effect" if its observed VE
+        # exceeds this threshold — used below to flag replicates whose
+        # conclusion contradicts the true V set above.
+        epsilon = st.slider(
+            "Detection threshold ε (VE)", 0.0, 0.5, 0.05, 0.01, format="%.2f",
+            help=(
+                "A replicate is judged to 'show an effect' if its observed "
+                "VE exceeds ε. Used to flag replicates where the observed "
+                "result contradicts what the true V above implies."
+            ),
+        )
+        # Which per-replicate imbalance metric drives the scatter plot below.
+        imbalance_view = st.selectbox(
+            "Imbalance metric to plot",
+            ["Combined (mean partners/period)"] + ACTIVE_LABELS,
+            help=(
+                "Combined: difference in each arm's overall mean partners "
+                "per period. Per-bucket: difference in the proportion of "
+                "each arm that landed in one specific bucket (e.g. >50) — "
+                "useful for testing whether imbalance in a single "
+                "high-activity bucket alone can flip the trial's conclusion."
+            ),
+        )
 
     st.divider()
 
@@ -333,14 +463,23 @@ def dist_panel(prefix, title, n_target, miss_key):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Distribution panels — one per arm, side by side
+# Distribution panel(s) — two independent arm panels in Manual mode, or one
+# pooled population panel (split into arms at simulation time) in Randomized
+# mode.
 # ─────────────────────────────────────────────────────────────────────────────
-st.header("Partner Count Distributions")
-left, right = st.columns(2)
-with left:
-    vax_counts, vax_miss, vax_ok = dist_panel("vax", "💉 Vaccinated", N_vax, "miss_vax")
-with right:
-    pbo_counts, pbo_miss, pbo_ok = dist_panel("pbo", "🧪 Placebo / Unvaccinated", N_placebo, "miss_pbo")
+if mode == "Manual Arm Distributions":
+    st.header("Partner Count Distributions")
+    left, right = st.columns(2)
+    with left:
+        vax_counts, vax_miss, vax_ok = dist_panel("vax", "💉 Vaccinated", N_vax, "miss_vax")
+    with right:
+        pbo_counts, pbo_miss, pbo_ok = dist_panel("pbo", "🧪 Placebo / Unvaccinated", N_placebo, "miss_pbo")
+else:
+    st.header("Population Partner Count Distribution")
+    pop_counts, pop_miss, pop_ok = dist_panel(
+        "pop", "🌐 Total Population (randomly split into arms at run time)",
+        N_tot, "miss_pop",
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -366,59 +505,28 @@ with st.expander("📌 Model Assumptions"):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Run simulation — everything below only executes after the button is clicked
-# (Streamlit reruns the whole script top-to-bottom on every interaction, so
-# `run_btn` is only True on the rerun triggered by that specific click).
+# Shared results renderer — everything below is common to both simulation
+# modes (Figures 1-3, top-line metrics, summary table, per-bucket detail).
+# Mode-specific outputs (the "proportions used" expander, and the
+# Randomized-mode imbalance analysis) are rendered by the caller afterward.
 # ─────────────────────────────────────────────────────────────────────────────
-if run_btn:
-    # Gate: both arms' bucket counts must sum exactly to their target N
-    # before we can build valid sampling proportions.
-    if not vax_ok or not pbo_ok:
-        if not vax_ok: st.error("❌ Vaccinated group counts do not sum to N_vax")
-        if not pbo_ok: st.error("❌ Placebo group counts do not sum to N_placebo")
-        st.stop()
+def render_results(df, vax_bi, pbo_bi, vax_bn, pbo_bn, bucket_ranges, upper_lo, upper_hi, p_ci, p_t, V):
+    """
+    Render every results output common to both simulation modes: the
+    zero-placebo-infections warning, top-line metrics, Figures 1-3, the
+    summary statistics table, and the per-bucket infection detail expander.
 
-    # Fold each arm's "Missing" bucket into the five active buckets per that
-    # arm's chosen strategy, producing the 5-length probability vectors that
-    # run_one_simulation samples bucket assignment from.
-    vax_props = get_adjusted_props(vax_counts, vax_miss)
-    pbo_props = get_adjusted_props(pbo_counts, pbo_miss)
+    df:      one row per replicate, columns n_vax, n_pbo, ci_v, ci_p, cir, ve.
+    vax_bi/pbo_bi/vax_bn/pbo_bn: shape (n_runs, n_buckets) infection/
+             population counts per bucket per replicate — see
+             run_one_simulation / run_one_simulation_randomized.
+    bucket_ranges, upper_lo, upper_hi, p_ci, p_t, V: passed straight through
+             to Figure 3, which is mode-agnostic (it only depends on the
+             >50 bucket's bounds and the transmission parameters, not on how
+             arms were assigned).
 
-    # Single shared RNG, seeded once, threaded through every replicate below
-    # so the whole batch of n_runs simulations is reproducible from `seed`.
-    rng     = np.random.default_rng(seed)
-    results = []
-    vax_bi_all, pbo_bi_all = [], []
-    vax_bn_all, pbo_bn_all = [], []
-
-    # ── Monte Carlo loop: run the trial n_runs independent times ───────────
-    prog = st.progress(0, text="Running simulations…")
-    for i in range(n_runs):
-        nvi, npi, vbi, pbi, vbn, pbn = run_one_simulation(
-            N_vax, N_placebo, vax_props, pbo_props,
-            bucket_ranges, p_ci, p_t, V, rng=rng,
-        )
-        ci_v = nvi / N_vax                       # cumulative incidence, vax arm
-        ci_p = npi / N_placebo                   # cumulative incidence, placebo arm
-        cir  = (ci_v / ci_p) if ci_p > 0 else np.nan   # cumulative incidence ratio
-        results.append(dict(
-            n_vax=nvi, n_pbo=npi,
-            ci_v=ci_v, ci_p=ci_p,
-            cir=cir,   ve=1.0 - cir,             # VE = 1 - CIR, this replicate's estimate
-        ))
-        vax_bi_all.append(vbi);  pbo_bi_all.append(pbi)
-        vax_bn_all.append(vbn);  pbo_bn_all.append(pbn)
-        prog.progress((i + 1) / n_runs)
-    prog.empty()
-
-    # One row per replicate: n_vax, n_pbo, ci_v, ci_p, cir, ve.
-    df     = pd.DataFrame(results)
-    # Each array below is shaped (n_runs, n_buckets) — one row per replicate.
-    vax_bi = np.array(vax_bi_all)   # infections per bucket, per replicate, vax
-    pbo_bi = np.array(pbo_bi_all)   # infections per bucket, per replicate, placebo
-    vax_bn = np.array(vax_bn_all)   # population per bucket, per replicate, vax
-    pbo_bn = np.array(pbo_bn_all)   # population per bucket, per replicate, placebo
-
+    Draws directly to the page; returns nothing.
+    """
     # Derived per-bucket metrics, computed across all replicates at once.
     # np.errstate + np.where(... > 0, ...) avoids 0/0 warnings for buckets
     # that happen to be empty in a given replicate.
@@ -665,9 +773,10 @@ if run_btn:
         use_container_width=True,
     )
 
-    # Two collapsed-by-default detail tables, for users who want the raw
-    # per-bucket numbers behind Figure 2 and the actual sampling proportions
-    # behind this run (post missing-data redistribution).
+    # Detail table for users who want the raw per-bucket numbers behind
+    # Figure 2. (The "proportions actually used" expander is mode-specific —
+    # manual mode has one fixed vector per arm, randomized mode has one
+    # pooled population vector — so the caller renders that separately.)
     with st.expander("Per-bucket infection detail (medians across runs)"):
         bk_df = pd.DataFrame({
             "Bucket":                        ACTIVE_LABELS,
@@ -683,6 +792,65 @@ if run_btn:
         })
         st.dataframe(bk_df, hide_index=True, use_container_width=True)
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Run simulation — everything below only executes after the button is clicked
+# (Streamlit reruns the whole script top-to-bottom on every interaction, so
+# `run_btn` is only True on the rerun triggered by that specific click). The
+# two branches share render_results() above for all mode-agnostic output;
+# each branch adds its own mode-specific setup and follow-up sections.
+# ─────────────────────────────────────────────────────────────────────────────
+if run_btn and mode == "Manual Arm Distributions":
+    # Gate: both arms' bucket counts must sum exactly to their target N
+    # before we can build valid sampling proportions.
+    if not vax_ok or not pbo_ok:
+        if not vax_ok: st.error("❌ Vaccinated group counts do not sum to N_vax")
+        if not pbo_ok: st.error("❌ Placebo group counts do not sum to N_placebo")
+        st.stop()
+
+    # Fold each arm's "Missing" bucket into the five active buckets per that
+    # arm's chosen strategy, producing the 5-length probability vectors that
+    # run_one_simulation samples bucket assignment from.
+    vax_props = get_adjusted_props(vax_counts, vax_miss)
+    pbo_props = get_adjusted_props(pbo_counts, pbo_miss)
+
+    # Single shared RNG, seeded once, threaded through every replicate below
+    # so the whole batch of n_runs simulations is reproducible from `seed`.
+    rng     = np.random.default_rng(seed)
+    results = []
+    vax_bi_all, pbo_bi_all = [], []
+    vax_bn_all, pbo_bn_all = [], []
+
+    # ── Monte Carlo loop: run the trial n_runs independent times ───────────
+    prog = st.progress(0, text="Running simulations…")
+    for i in range(n_runs):
+        nvi, npi, vbi, pbi, vbn, pbn = run_one_simulation(
+            N_vax, N_placebo, vax_props, pbo_props,
+            bucket_ranges, p_ci, p_t, V, rng=rng,
+        )
+        ci_v = nvi / N_vax                       # cumulative incidence, vax arm
+        ci_p = npi / N_placebo                   # cumulative incidence, placebo arm
+        cir  = (ci_v / ci_p) if ci_p > 0 else np.nan   # cumulative incidence ratio
+        results.append(dict(
+            n_vax=nvi, n_pbo=npi,
+            ci_v=ci_v, ci_p=ci_p,
+            cir=cir,   ve=1.0 - cir,             # VE = 1 - CIR, this replicate's estimate
+        ))
+        vax_bi_all.append(vbi);  pbo_bi_all.append(pbi)
+        vax_bn_all.append(vbn);  pbo_bn_all.append(pbn)
+        prog.progress((i + 1) / n_runs)
+    prog.empty()
+
+    # One row per replicate: n_vax, n_pbo, ci_v, ci_p, cir, ve.
+    df     = pd.DataFrame(results)
+    # Each array below is shaped (n_runs, n_buckets) — one row per replicate.
+    vax_bi = np.array(vax_bi_all)   # infections per bucket, per replicate, vax
+    pbo_bi = np.array(pbo_bi_all)   # infections per bucket, per replicate, placebo
+    vax_bn = np.array(vax_bn_all)   # population per bucket, per replicate, vax
+    pbo_bn = np.array(pbo_bn_all)   # population per bucket, per replicate, placebo
+
+    render_results(df, vax_bi, pbo_bi, vax_bn, pbo_bn, bucket_ranges, upper_lo, upper_hi, p_ci, p_t, V)
+
     with st.expander("Effective bucket proportions used in this run"):
         st.dataframe(
             pd.DataFrame({
@@ -694,3 +862,158 @@ if run_btn:
             hide_index=True,
             use_container_width=True,
         )
+
+
+elif run_btn and mode == "Randomized Single Population":
+    # Gate: the pooled population's bucket counts must sum exactly to N_tot.
+    if not pop_ok:
+        st.error("❌ Population counts do not sum to Total N")
+        st.stop()
+
+    # One shared distribution the whole population is drawn from each
+    # replicate; arm membership itself is randomized at simulation time
+    # (see run_one_simulation_randomized), not fixed here.
+    pop_props = get_adjusted_props(pop_counts, pop_miss)
+
+    rng     = np.random.default_rng(seed)
+    results = []
+    vax_bi_all, pbo_bi_all = [], []
+    vax_bn_all, pbo_bn_all = [], []
+
+    prog = st.progress(0, text="Running simulations…")
+    for i in range(n_runs):
+        nvi, npi, vbi, pbi, vbn, pbn = run_one_simulation_randomized(
+            N_vax, N_placebo, pop_props,
+            bucket_ranges, p_ci, p_t, V, rng=rng,
+        )
+        ci_v = nvi / N_vax
+        ci_p = npi / N_placebo
+        cir  = (ci_v / ci_p) if ci_p > 0 else np.nan
+        results.append(dict(
+            n_vax=nvi, n_pbo=npi,
+            ci_v=ci_v, ci_p=ci_p,
+            cir=cir,   ve=1.0 - cir,
+        ))
+        vax_bi_all.append(vbi);  pbo_bi_all.append(pbi)
+        vax_bn_all.append(vbn);  pbo_bn_all.append(pbn)
+        prog.progress((i + 1) / n_runs)
+    prog.empty()
+
+    df     = pd.DataFrame(results)
+    vax_bi = np.array(vax_bi_all)
+    pbo_bi = np.array(pbo_bi_all)
+    vax_bn = np.array(vax_bn_all)
+    pbo_bn = np.array(pbo_bn_all)
+
+    render_results(df, vax_bi, pbo_bi, vax_bn, pbo_bn, bucket_ranges, upper_lo, upper_hi, p_ci, p_t, V)
+
+    with st.expander("Population proportions used in this run"):
+        st.dataframe(
+            pd.DataFrame({
+                "Bucket":     ACTIVE_LABELS,
+                "Range":      [f"{r[0]}–{r[1]}" for r in bucket_ranges],
+                "Population": [f"{p:.4f}" for p in pop_props],
+            }),
+            hide_index=True,
+            use_container_width=True,
+        )
+
+    # ── Chance-imbalance analysis ────────────────────────────────────────────
+    # Because arm membership is randomized from a single pooled population,
+    # the two arms' realized partner-count mixes can differ purely by
+    # chance — especially at small N. This checks whether that chance
+    # imbalance was large enough, in any replicate, to produce a result
+    # that contradicts the true V set in the sidebar.
+    st.header("Chance Imbalance Between Arms")
+    st.caption(
+        "Because arm membership is randomized from a single pooled "
+        "population, the two arms' realized partner-count mixes can differ "
+        "purely by chance — especially at small N. This section checks "
+        "whether that chance imbalance was large enough, in any replicate, "
+        f"to produce a trial result that contradicts the true V = {V:.2f} "
+        "set in the sidebar."
+    )
+
+    # Bucket midpoints turn each arm's realized bucket counts into one
+    # summary number per replicate: mean partners-per-period for that arm.
+    bucket_mid         = np.array([(r[0] + r[1]) / 2 for r in bucket_ranges])
+    vax_mean_partners  = (vax_bn * bucket_mid).sum(axis=1) / N_vax
+    pbo_mean_partners  = (pbo_bn * bucket_mid).sum(axis=1) / N_placebo
+    imbalance_combined = vax_mean_partners - pbo_mean_partners   # shape (n_runs,)
+
+    # Per-bucket proportion imbalance: vax arm's share of that bucket minus
+    # placebo arm's share, one column per active bucket, per replicate.
+    vax_prop_bucket  = vax_bn / N_vax
+    pbo_prop_bucket  = pbo_bn / N_placebo
+    bucket_imbalance = vax_prop_bucket - pbo_prop_bucket        # shape (n_runs, 5)
+
+    # A replicate is "counter-intuitive" if whether it shows a detectable
+    # effect (VE > ε) disagrees with what the true V implies: V > 0 should
+    # show an effect, V = 0 should not. This single rule covers both error
+    # types (masked true effect, or spurious apparent effect) depending on
+    # which V the sidebar is currently set to.
+    expected_effect   = V > 0
+    valid             = df.ve.notna()
+    observed_effect   = df.ve > epsilon
+    counter_intuitive = (observed_effect != expected_effect) & valid
+
+    n_valid  = int(valid.sum())
+    n_flag   = int(counter_intuitive.sum())
+    pct_flag = (n_flag / n_valid * 100) if n_valid else float("nan")
+
+    st.metric(
+        "Counter-intuitive replicates",
+        f"{pct_flag:.1f}%  ({n_flag} of {n_valid})",
+        help=(
+            f"Replicates where observed VE {'did not exceed' if expected_effect else 'exceeded'} "
+            f"ε = {epsilon:.2f}, contrary to what V = {V:.2f} implies."
+        ),
+    )
+
+    # Pick which imbalance metric drives the scatter's x-axis, per the
+    # sidebar selector.
+    if imbalance_view == "Combined (mean partners/period)":
+        imb_x   = imbalance_combined
+        x_label = "Vax − Placebo mean partners/period"
+    else:
+        k       = ACTIVE_LABELS.index(imbalance_view)
+        imb_x   = bucket_imbalance[:, k]
+        x_label = f"Vax − Placebo proportion in {imbalance_view} bucket"
+
+    # ── Figure 4: Arm imbalance vs. observed VE ────────────────────────────
+    st.subheader("Arm Imbalance vs. Observed VE")
+    fig4, ax4 = plt.subplots(figsize=(8, 5))
+    normal_mask = valid & ~counter_intuitive
+    ax4.scatter(imb_x[normal_mask], df.ve[normal_mask],
+                color="steelblue", alpha=0.6, label="Expected direction")
+    ax4.scatter(imb_x[counter_intuitive], df.ve[counter_intuitive],
+                color="crimson", alpha=0.85, label="Counter-intuitive")
+    ax4.axhline(epsilon, color="black", ls="--", lw=1, alpha=0.5,
+                label=f"ε = {epsilon:.2f}")
+    ax4.axvline(0, color="gray", ls=":", lw=1, alpha=0.6)
+    ax4.set_xlabel(x_label)
+    ax4.set_ylabel("Observed VE (this replicate)")
+    ax4.set_title("Does chance arm imbalance predict a flipped conclusion?")
+    ax4.legend(fontsize=8)
+    st.pyplot(fig4)
+    plt.close(fig4)
+
+    # Diagnostic table: for just the flagged replicates, show exactly which
+    # bucket(s) were imbalanced between arms that replicate.
+    with st.expander(f"Counter-intuitive replicate details ({n_flag} of {n_valid})"):
+        if n_flag == 0:
+            st.write("No counter-intuitive replicates in this batch.")
+        else:
+            flagged_idx = np.where(counter_intuitive)[0]
+            diag_rows = []
+            for i in flagged_idx:
+                row = {
+                    "Replicate":            int(i),
+                    "VE":                   round(float(df.ve.iloc[i]), 4),
+                    "Imbalance (combined)": round(float(imbalance_combined[i]), 3),
+                }
+                for bi, lbl in enumerate(ACTIVE_LABELS):
+                    row[f"Vax % {lbl}"] = round(float(vax_prop_bucket[i, bi]) * 100, 2)
+                    row[f"Pbo % {lbl}"] = round(float(pbo_prop_bucket[i, bi]) * 100, 2)
+                diag_rows.append(row)
+            st.dataframe(pd.DataFrame(diag_rows), hide_index=True, use_container_width=True)

@@ -228,7 +228,20 @@ Median, 25th percentile, 75th percentile, 2.5th percentile, 97.5th percentile, m
 
 ---
 
-## 7. Session Log
+## 7. Known Issues
+
+### `Vaccinated N_vax` crashes when `Total N` is reduced below ~501
+
+- **Symptom:** Setting **Total N** below 501 (e.g. to explore small-N behavior) crashes the app with `StreamlitValueAboveMaxError: The value 500 is greater than the max_value <N_tot - 1>`.
+- **Root cause:** `st.number_input("Vaccinated N_vax", value=500, min_value=1, max_value=N_tot - 1, step=50)` has no explicit `key=`. Streamlit auto-derives a widget's identity from a hash of *all* its parameters when no key is given — including `max_value`. Changing `Total N` changes `max_value`, so Streamlit treats it as a brand-new widget with no memory of what the user previously typed, and falls back to the literal `value=500` in the code. That hardcoded default then exceeds the new (smaller) `max_value`, crashing instead of clamping.
+- **Trigger:** Reproducible regardless of what `Vaccinated N_vax` was previously set to — it's the *code's* `max_value` parameter changing that invalidates the widget's identity, not the user's input.
+- **Discovered:** July 28, 2026, while browser-testing the new Randomized Single Population mode at small N (see Session 4 below). Confirmed pre-existing — reproduces identically in Manual mode and is unrelated to that session's changes.
+- **Suggested fix (not yet applied):** give the widget an explicit `key="n_vax"` so its identity persists across reruns independent of `max_value`, and/or clamp the initial default to `min(500, N_tot - 1)`.
+- **Impact:** Blocks interactively testing small-N scenarios through the UI. The new Randomized mode's simulation logic was instead verified directly in Python, bypassing the UI (see Session 4).
+
+---
+
+## 8. Session Log
 
 ### July 23, 2026 — Session 1
 
@@ -272,6 +285,18 @@ Median, 25th percentile, 75th percentile, 2.5th percentile, 97.5th percentile, m
 - Updated the notebook's "Privacy Notes" section (§6) to capture this reasoning for future reference
 - Renamed this file from `7-27-26-notebook.md` to `lab-notebook.md`, to make clear it's a single running notebook rather than a per-date file
 
+### July 28, 2026 — Session 4
+
+- Designed and implemented a new **Randomized Single Population** simulation mode in `app.py`, alongside the existing Manual Arm Distributions mode (toggle at the top of the page):
+    - One pooled population partner-count distribution is defined instead of two independent per-arm distributions
+    - New `run_one_simulation_randomized()`: draws every person's bucket from the pooled distribution, then shuffles and splits the population — the first `N_vax` people become vaccinated, the rest placebo (block randomization) — so arm sizes are always exact but bucket *composition* can differ by chance, especially at small N
+    - Refactored the existing Figures 1–3 / summary table / per-bucket detail code out of the old monolithic run block into a shared `render_results()` function used by both modes, to avoid duplicating ~150 lines
+    - Added a new "Chance Imbalance Between Arms" section (Randomized mode only): a combined or per-bucket imbalance metric (selectable, including the `>50` bucket specifically), a "% counter-intuitive replicates" statistic, a scatter plot of imbalance vs. observed VE, and a diagnostic table listing exact per-bucket breakdowns for flagged replicates
+    - "Counter-intuitive" is defined as: whether a replicate shows a detectable effect (VE > ε, ε adjustable) disagrees with what the true V implies (V > 0 should show an effect; V = 0 should not) — one rule that covers both the "vaccine works but trial shows nothing" and "no effect but trial shows one" failure modes from the same run
+- **Verified the new logic directly in Python** (bypassing the UI, which hit the small-N crash described in §7): at N=25/25 with true V=0.3, 30.3% of replicates were counter-intuitive; at N=500/500, only 3.6% were — confirming chance imbalance shrinks with N as expected. Arm sizes were always exact across all replicates.
+- Discovered the pre-existing small-N crash bug in `Vaccinated N_vax` while testing (see §7, Known Issues) — confirmed unrelated to this session's changes (reproduces identically in the old Manual mode) and left unfixed pending a decision on priority
+- Did not get a live browser confirmation that "Run Simulation" renders the new section end-to-end in Randomized mode — repeated automated-browser click attempts failed, but a control test showed the *same, pre-existing* Run button also fails to trigger via automation in Manual mode, indicating a session-specific browser-automation limitation rather than a bug in the new code
+
 ---
 
-*Add a new dated entry under Section 7 at the start of each session.*
+*Add a new dated entry under Section 8 at the start of each session.*
