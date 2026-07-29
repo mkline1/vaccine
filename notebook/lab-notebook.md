@@ -1,7 +1,7 @@
 # Per-Contact Vaccine Efficacy Dashboard — Lab Notebook
 
 **Project start:** July 23, 2026
-**Last updated:** July 28, 2026
+**Last updated:** July 29, 2026
 **Platform:** Python / Streamlit
 **Repository:** Public GitHub repo with GitHub Pages for documentation
 
@@ -237,24 +237,25 @@ Median, 25th percentile, 75th percentile, 2.5th percentile, 97.5th percentile, m
 - **Where this shows up:** Most pronounced in the high-activity buckets, but since those buckets already drive a disproportionate share of total infections (see Figure 2 / §5), high enough `p_ci` can pull the *overall* trial-level VE down toward zero too, not just the >50 bucket's own estimate.
 - **Implication:** A trial's ability to *detect* a real per-contact effect depends heavily on the background prevalence/transmission environment, not just on whether V is truly nonzero — worth keeping in mind when interpreting "no observed effect" results from either simulation mode, separately from the chance-imbalance question below.
 
-### Detection threshold ε — open question
+### ~~Detection threshold ε — open question~~ — Resolved July 29, 2026
 
-- The Randomized Single Population mode's "counter-intuitive replicate" classifier (§5, chance-imbalance analysis) uses a fixed **ε threshold on the point-estimate VE** (default 0.05) to decide whether a replicate "shows an effect."
-- **Flagged as not fully settled (2026-07-28):** a fixed point-estimate cutoff doesn't obviously capture what "detecting an effect" should mean — e.g. it ignores the precision/uncertainty behind each replicate's VE estimate, unlike how a real trial would use a confidence interval or formal hypothesis test rather than a bare threshold on the observed value.
-- **Status:** open question, to revisit — no change made yet. If reworked, likely candidates are a CI/interval-based rule instead of a fixed ε, or scaling ε to N somehow.
+- **Original concern (2026-07-28):** the "counter-intuitive replicate" classifier used a fixed **ε threshold on the point-estimate VE** (default 0.05) to decide whether a single replicate "showed an effect" — a fixed point-estimate cutoff that ignored the precision/uncertainty behind each estimate.
+- **Resolution (Session 6):** replaced ε entirely with an **interquartile-range (IQR) rule**, and restructured the simulation into a proper nested design to support it:
+    - **Randomizations** (outer loop, new "Number of randomizations" parameter): each is one population draw + one arm shuffle-split, held fixed.
+    - **Runs per randomization** (inner loop, the existing "Runs" parameter): repeats of the infection process under that same fixed split, producing a distribution of VE estimates — median, 25th, and 75th percentile — for that one randomization.
+    - **Verdict per randomization:** does its VE's 25th–75th percentile interval cross zero? If true `V = 0`, the interval crossing zero is *expected*; if true `V > 0`, the interval should stay entirely above zero — a randomization is "counter-intuitive" whenever the interval's relationship to zero contradicts what the true `V` implies.
+- **Emergent finding from testing this:** even at **N = 500/arm** (large), true `V = 0`, and 100 runs per randomization, roughly **35–40% of randomizations were still counter-intuitive** by this rule. This is not a bug — it reflects that the per-run VE estimator's noise (SD ≈ 0.04 in this setting) and the between-randomization spread from chance arm imbalance are of *comparable magnitude* even at N = 500, so a 100-run sample's IQR misses zero by chance fairly often. Increasing "Runs per randomization" narrows each randomization's IQR and should reduce this rate; this is a real, useful operating characteristic of the design to be aware of, not an artifact.
 
 ---
 
 ## 8. Known Issues
 
-### `Vaccinated N_vax` crashes when `Total N` is reduced below ~501
+### ~~`Vaccinated N_vax` crashes when `Total N` is reduced below ~501~~ — Fixed July 29, 2026
 
-- **Symptom:** Setting **Total N** below 501 (e.g. to explore small-N behavior) crashes the app with `StreamlitValueAboveMaxError: The value 500 is greater than the max_value <N_tot - 1>`.
-- **Root cause:** `st.number_input("Vaccinated N_vax", value=500, min_value=1, max_value=N_tot - 1, step=50)` has no explicit `key=`. Streamlit auto-derives a widget's identity from a hash of *all* its parameters when no key is given — including `max_value`. Changing `Total N` changes `max_value`, so Streamlit treats it as a brand-new widget with no memory of what the user previously typed, and falls back to the literal `value=500` in the code. That hardcoded default then exceeds the new (smaller) `max_value`, crashing instead of clamping.
-- **Trigger:** Reproducible regardless of what `Vaccinated N_vax` was previously set to — it's the *code's* `max_value` parameter changing that invalidates the widget's identity, not the user's input.
-- **Discovered:** July 28, 2026, while browser-testing the new Randomized Single Population mode at small N (see Session 4 below). Confirmed pre-existing — reproduces identically in Manual mode and is unrelated to that session's changes.
-- **Suggested fix (not yet applied):** give the widget an explicit `key="n_vax"` so its identity persists across reruns independent of `max_value`, and/or clamp the initial default to `min(500, N_tot - 1)`.
-- **Impact:** Blocks interactively testing small-N scenarios through the UI. The new Randomized mode's simulation logic was instead verified directly in Python, bypassing the UI (see Session 4).
+- **Symptom:** Setting **Total N** below 501 (e.g. to explore small-N behavior) crashed the app with `StreamlitValueAboveMaxError: The value 500 is greater than the max_value <N_tot - 1>`.
+- **Root cause:** `st.number_input("Vaccinated N_vax", value=500, min_value=1, max_value=N_tot - 1, step=50)` had no explicit `key=`. Streamlit auto-derives a widget's identity from a hash of *all* its parameters when no key is given — including `max_value`. Changing `Total N` changed `max_value`, so Streamlit treated it as a brand-new widget with no memory of what the user previously typed, and fell back to the literal `value=500` in the code. That hardcoded default then exceeded the new (smaller) `max_value`, crashing instead of clamping.
+- **Discovered:** July 28, 2026, while browser-testing the Randomized Single Population mode at small N (Session 4). Confirmed pre-existing — reproduced identically in Manual mode.
+- **Fix applied (Session 6):** gave the widget an explicit `key="n_vax"` so its identity persists across reruns independent of `max_value`. `N_vax` now defaults to `N_tot // 2` on first load, and is only clamped down (never forcibly reset) if a later reduction in `Total N` would put it out of bounds — a deliberate uneven split you've set is preserved otherwise.
 
 ---
 
@@ -321,6 +322,17 @@ Median, 25th percentile, 75th percentile, 2.5th percentile, 97.5th percentile, m
 - Flagged the ε detection-threshold parameter as not obviously well-motivated — recorded as an open question in §7, "Detection threshold ε — open question," rather than resolved on the spot
 - Noted an important modeling insight from exploring the app: in high-prevalence settings (`p_ci` high), it's easy to see no apparent vaccine effect at the trial level even with a real 30% per-contact efficacy, due to a ceiling effect in the per-period infection probability formula — recorded in §7, "High-prevalence 'ceiling effect' can mask real per-contact efficacy"
 - Added new notebook section "§7. Modeling Insights & Open Questions" to hold observations like these going forward, separate from the "Known Issues" bug log (renumbered to §8) and Session Log (renumbered to §9)
+
+### July 29, 2026 — Session 6
+
+- **Fixed the `Vaccinated N_vax` crash** (§8): gave the widget an explicit `key="n_vax"`, defaulted it to `N_tot // 2` on first load, and made later reductions in `Total N` only clamp `N_vax` down (never forcibly re-split it) if it would otherwise no longer fit — preserves a deliberately uneven split.
+- **Restructured Randomized Single Population mode into a proper nested design**, replacing the flat "n_runs total replicates" loop:
+    - Split the old `run_one_simulation_randomized` into two reusable pieces: `assign_randomized_arms()` (one population draw + one arm shuffle-split — "one randomization") and a new shared `run_infection_process()` (the per-period infection mechanics, callable repeatedly against the SAME arm assignment — "runs per randomization"). `run_one_simulation` (Manual mode) was refactored to call the same shared `run_infection_process()`, removing what would otherwise have been duplicated physics code in three places.
+    - New sidebar parameter "Number of randomizations" (outer loop count); the existing "Runs" parameter is now specifically "Runs per randomization" (inner loop count) in this mode.
+    - Figures 1–3 / summary table (via `render_results()`) now summarize the **pooled** results across every (randomization, run) pair — the trial design's overall operating characteristics, mixing both randomization-imbalance noise and infection-process noise, same as a real trial would experience both at once.
+- **Replaced the ε-threshold classifier with the user-specified IQR-crosses-zero rule** (§7, resolved): for each randomization, take the median VE and 25th/75th percentile across its runs; a randomization is counter-intuitive if whether its IQR crosses zero disagrees with what the true V implies. The "Arm Imbalance vs. Per-Randomization VE" scatter plot and diagnostic table were reworked accordingly, one point/row per randomization (median VE with an IQR error bar) rather than one per individual run.
+- **Verified all of the above directly in Python** (bypassing the UI, consistent with prior sessions): confirmed the same fixed arm assignment produces different outcomes across repeated `run_infection_process()` calls (infection noise only), confirmed Manual mode still works after the refactor, and ran the full nested randomizations × runs structure at both N=25/arm and N=500/arm.
+- **Notable emergent finding**, not a bug: even at N=500/arm with true V=0 and 100 runs per randomization, ~35–40% of randomizations were still counter-intuitive by the IQR rule — the per-run VE estimator's noise and the between-randomization imbalance spread are comparable in magnitude at this N. Recorded in §7.
 
 ---
 
