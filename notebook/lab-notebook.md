@@ -23,7 +23,7 @@ The core question:
 
 - Total N = 1,000 (default); split into vaccinated and placebo arms (500 / 500 default)
 - Follow-up: 4 six-month periods (2 years total)
-- Each person assigned to a fixed behavioural risk bucket at baseline
+- Each person assigned to a fixed behavioral risk bucket at baseline
 
 ### Partner Count Buckets
 
@@ -64,6 +64,8 @@ A single Bernoulli draw is made. If infected, the person exits the at-risk pool 
 
 Because each person is a binary (ever-infected) outcome with no reinfections, CIR is equivalent to a risk ratio — the standard VE estimator in efficacy trials.
 
+**Zero-placebo-infection runs are excluded from summaries (2026-07-29):** if a run/replicate happens to have zero placebo infections, `CI_placebo = 0`, making `CIR = CI_vaccinated / 0` undefined. That run's `cir`/`ve` are recorded as `NaN` rather than a computed number, and are excluded from every downstream summary (medians, IQRs, percentiles, and the Figures 1–3 plots) via `np.nanmedian`/`np.nanquantile`-style functions and `.dropna()`. The app surfaces this explicitly with a warning banner ("N run(s) had zero placebo infections → CIR/VE undefined. Excluded from summaries and plots.") rather than silently dropping them.
+
 ---
 
 ## 3. Model Assumptions
@@ -71,7 +73,7 @@ Because each person is a binary (ever-infected) outcome with no reinfections, CI
 1. **1 partner = 1 sexual contact.** Partner count is used directly as the number of independent exposure events per period.
 2. **p_contact_infected is fixed and homogeneous.** Every contact has the same probability of being infected, regardless of time, location, or partner identity.
 3. **Each contact is independent.** No network effects, no partnership duration, no repeated contacts with the same partner within a period.
-4. **Bucket assignment is fixed for the entire 2-year study.** A person's behavioural risk category does not change across the four periods.
+4. **Bucket assignment is fixed for the entire 2-year study.** A person's behavioral risk category does not change across the four periods.
 5. **Partner counts are redrawn independently each period** from Discrete Uniform within the person's fixed bucket.
 6. **No reinfections.** Once infected a person exits the at-risk pool permanently. VE is estimated from binary (ever-infected) outcomes.
 7. **VE acts multiplicatively** on per-contact transmission probability: p_vax = p_ci x p_t x (1 - V).
@@ -101,7 +103,7 @@ Because each person is a binary (ever-infected) outcome with no reinfections, CI
 
 ### Per-Arm Distributions
 
-- Two arms have **completely independent distributions** — allows exploration of differential missing-data assumptions and potential imbalance in behavioural risk across arms
+- Two arms have **completely independent distributions** — allows exploration of differential missing-data assumptions and potential imbalance in behavioral risk across arms
 - Inputs are **count-based** (integer people, step = ±1) rather than proportions — user thinks in terms of moving one person from one bucket to another
 - Live proportion table and running total update immediately as counts change
 - Run button is blocked until both arms sum exactly to their target N
@@ -117,10 +119,12 @@ Three strategies selectable **per arm independently:**
 
 Having separate selectors per arm implicitly covers the "split by group" scenario without needing a separate mode.
 
+**Note on "Redistribute evenly" (2026-07-29):** "evenly" means *equally* — the missing count is split 5 ways and the same flat `miss / 5` is added to every bucket, regardless of that bucket's existing size. It is **not proportional** to each bucket's current share (i.e. the `11–50` bucket, which already holds the most people by default, doesn't get a proportionally larger share of the missing count than `0–1` does). In effect this strategy nudges the overall mix slightly toward the smaller buckets rather than preserving the pre-redistribution ratios exactly.
+
 ### Bucket Assignment
 
 - **Fixed for the full two-year study**
-- Reflects the assumption that behavioural risk category is a stable individual characteristic, not something that changes period to period
+- Reflects the assumption that behavioral risk category is a stable individual characteristic, not something that changes period to period
 
 ### Reinfections
 
@@ -160,20 +164,22 @@ Having separate selectors per arm implicitly covers the "split by group" scenari
 ### Figure 1 — Simulation Outcome Distributions
 
 - **Left:** histogram of VE across runs; median and 2.5/97.5 percentile lines marked
-- **Centre:** overlaid histograms of cumulative incidence for both arms; median lines for each arm marked
+- **Center:** overlaid histograms of cumulative incidence for both arms; median lines for each arm marked
 - **Right:** histogram of CIR; null line at CIR = 1 and median marked
 
 ### Figure 2 — Infections by Partner Count Bucket
 
 - **Left:** median absolute infections per bucket, vaccinated vs. placebo
-- **Centre:** median cumulative incidence per bucket — proportion of people in each bucket who become infected
+- **Center:** median cumulative incidence per bucket — proportion of people in each bucket who become infected
 - **Right:** share of total infections attributable to each bucket — illustrates that high-activity buckets drive a disproportionate fraction of all events even when they are a small fraction of the population
 - All bars show IQR as error bars
 
 ### Figure 3 — Within >50 Bucket Detail
 
-- **Left:** distribution of total partners accumulated across all four periods for a person in the >50 bucket — generated analytically via 200,000 draws from the sum of four independent Discrete Uniforms; uses fixed seed 0 so the plot is deterministic
-- **Right:** theoretical (exact, not simulation-based) cumulative incidence curve as a function of total partner count, for both arms; median total partner count marked by dashed line
+**Neither panel in this figure comes from the main Monte Carlo simulation (Figures 1–2).** Both are idealized/theoretical reference calculations that describe the `>50` bucket's exposure range and the risk it implies, in isolation — they ignore the real simulation's *informative dropout*: in the actual trial, once a person is infected they exit the at-risk pool and stop accumulating partners for any remaining periods (notebook assumption 6), so a real simulated person's total partner count depends on *when, if ever,* they got infected. Neither panel here accounts for that.
+
+- **Left:** distribution of total partners accumulated across all four periods for a hypothetical person in the >50 bucket, **assuming they survive uninfected through all 4 periods** (not derived from any simulated trial outcomes) — generated by drawing 200,000 samples of the sum of four independent Discrete Uniforms and plotting their histogram; uses a fixed seed (0), independent of the sidebar's simulation seed, so the plot is always identical regardless of what seed is used for the actual trial simulation.
+- **Right:** an exact closed-form curve, `CI(t) = 1 − (1 − p_per_contact)^t`, evaluated directly as a function of total partner count `t` — no sampling or randomness of any kind. This formula treats all `t` total partners as if they occurred as one lump exposure (the standard "at least one infection across t independent contacts" formula), rather than reflecting the period-by-period structure with early exit on infection. The median total partner count from the left panel is marked with a dashed line, to show where a "typical" bucket member would land on this risk curve.
 - Key insight: even within the >50 bucket there is a wide range of total contacts (e.g. 204–400 with default bounds) and CI rises steeply across that range — which is why the choice of upper bound matters
 
 ### Summary Table
@@ -192,10 +198,11 @@ Median, 25th percentile, 75th percentile, 2.5th percentile, 97.5th percentile, m
 ### Repository Structure
 
     repo/
-    ├── app.py            # Streamlit app — all simulation logic and UI
-    ├── requirements.txt  # Python dependencies
-    ├── index.html        # Documentation page served via GitHub Pages
-    └── notebook.md       # This file — lab notebook and session log
+    ├── app.py                  # Streamlit app — all simulation logic and UI
+    ├── requirements.txt        # Python dependencies
+    ├── README.md               # Directory-level overview
+    └── notebook/
+        └── lab-notebook.md     # This file — lab notebook and session log
 
 ### Dependencies
 
@@ -203,13 +210,6 @@ Median, 25th percentile, 75th percentile, 2.5th percentile, 97.5th percentile, m
     numpy
     pandas
     matplotlib
-
-### GitHub Pages
-
-- `index.html` served publicly via GitHub Pages
-- Contains full methodology documentation, assumptions, and design decisions
-- To update: edit the file, push to GitHub; Pages rebuilds automatically within ~60 seconds
-- Hard refresh browser to see changes (Cmd+Shift+R on Mac, Ctrl+Shift+R on Windows)
 
 ### Streamlit Community Cloud
 

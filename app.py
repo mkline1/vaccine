@@ -134,9 +134,18 @@ def get_adjusted_props(counts_6, mode):
         "Redistribute evenly across buckets" -> split missing count 5 ways
         "All → highest risk (>50)"           -> all missing added to bucket 4
         "All → lowest risk (0–1)"            -> all missing added to bucket 0
+
+    Note: "Redistribute evenly across buckets" means EQUALLY — miss / 5 is
+    added to every bucket regardless of that bucket's existing size — not
+    PROPORTIONALLY to each bucket's current share. A bucket that already
+    has many more people than another still only gets the same flat miss/5
+    addition, so this strategy shifts the overall mix slightly toward the
+    smaller buckets rather than preserving the pre-redistribution ratios.
     """
     c    = [float(x) for x in counts_6[:5]]
     miss = float(counts_6[5])
+    # miss / 5 is a flat per-bucket addition (equal), not weighted by each
+    # bucket's current count (proportional) — see docstring note above.
     if   mode == "Redistribute evenly across buckets": c = [x + miss / 5 for x in c]
     elif mode == "All → highest risk (>50)":           c[4] += miss
     else:                                              c[0] += miss
@@ -511,7 +520,7 @@ with st.expander("📌 Model Assumptions"):
 | 1 | **1 partner = 1 sexual contact.** Partner count is used directly as the number of independent exposure events per period. |
 | 2 | **p_contact_infected is fixed and homogeneous.** Every contact has the same probability of being infected, regardless of time, location, or partner identity. |
 | 3 | **Each contact is independent.** No network effects, partnership duration, or repeated contacts with the same partner. |
-| 4 | **Bucket assignment is fixed** for the full 2-year study — behavioural risk category does not change across periods. |
+| 4 | **Bucket assignment is fixed** for the full 2-year study — behavioral risk category does not change across periods. |
 | 5 | **Partner counts are redrawn each period** from Discrete Uniform within the person's fixed bucket. |
 | 6 | **No reinfections.** Once infected a person exits the at-risk pool permanently; VE is estimated from binary (ever-infected) outcomes. |
 | 7 | **VE is multiplicative:** p_vax = p_ci × p_t × (1−V);  p_placebo = p_ci × p_t. |
@@ -611,7 +620,7 @@ def render_results(df, vax_bi, pbo_bi, vax_bn, pbo_bn, bucket_ranges, upper_lo, 
     ax.set_xlabel("Vaccine Efficacy"); ax.set_ylabel("Count")
     ax.legend(fontsize=8)
 
-    # Centre panel: cumulative incidence for both arms overlaid, each with
+    # Center panel: cumulative incidence for both arms overlaid, each with
     # its own median line, to visualize the separation CIR is computed from.
     ax = axes1[1]
     ax.hist(df.ci_v, bins=30, color="steelblue", alpha=0.7,
@@ -670,7 +679,7 @@ def render_results(df, vax_bi, pbo_bi, vax_bn, pbo_bn, bucket_ranges, upper_lo, 
     ax.set_xlabel("Partner Count Bucket"); ax.set_ylabel("Infections (n)")
     ax.set_title("Median Infections per Bucket"); ax.legend()
 
-    # Centre: cumulative incidence *within* each bucket (infections / bucket
+    # Center: cumulative incidence *within* each bucket (infections / bucket
     # population) — shows risk concentration independent of bucket size.
     ax = axes2[1]
     bar_with_iqr(
