@@ -228,7 +228,24 @@ Median, 25th percentile, 75th percentile, 2.5th percentile, 97.5th percentile, m
 
 ---
 
-## 7. Known Issues
+## 7. Modeling Insights & Open Questions
+
+### High-prevalence "ceiling effect" can mask real per-contact efficacy
+
+- **Observation:** In high-prevalence settings — where `P(contact infected)` (`p_ci`) is high — it's easy to see **no apparent vaccine effect at the trial level even when per-contact efficacy V is genuinely 30%** (or higher).
+- **Why:** Per-period infection probability is `1 - (1 - p_per_contact)^partners`. When `p_per_contact = p_ci × p_t` is already high, this quantity saturates toward 1 very quickly as `partners` grows — and a 30% reduction in `p_per_contact` (the vaccinated arm's `× (1 − V)` factor) barely moves a probability that's already close to 1 back down. For people with many partners per period (the `11–50` and especially `>50` buckets), **both arms end up with cumulative incidence near 1** within one or a few periods regardless of vaccination status, so `CIR ≈ 1` and observed `VE ≈ 0` — even though the underlying per-contact protection is real.
+- **Where this shows up:** Most pronounced in the high-activity buckets, but since those buckets already drive a disproportionate share of total infections (see Figure 2 / §5), high enough `p_ci` can pull the *overall* trial-level VE down toward zero too, not just the >50 bucket's own estimate.
+- **Implication:** A trial's ability to *detect* a real per-contact effect depends heavily on the background prevalence/transmission environment, not just on whether V is truly nonzero — worth keeping in mind when interpreting "no observed effect" results from either simulation mode, separately from the chance-imbalance question below.
+
+### Detection threshold ε — open question
+
+- The Randomized Single Population mode's "counter-intuitive replicate" classifier (§5, chance-imbalance analysis) uses a fixed **ε threshold on the point-estimate VE** (default 0.05) to decide whether a replicate "shows an effect."
+- **Flagged as not fully settled (2026-07-28):** a fixed point-estimate cutoff doesn't obviously capture what "detecting an effect" should mean — e.g. it ignores the precision/uncertainty behind each replicate's VE estimate, unlike how a real trial would use a confidence interval or formal hypothesis test rather than a bare threshold on the observed value.
+- **Status:** open question, to revisit — no change made yet. If reworked, likely candidates are a CI/interval-based rule instead of a fixed ε, or scaling ε to N somehow.
+
+---
+
+## 8. Known Issues
 
 ### `Vaccinated N_vax` crashes when `Total N` is reduced below ~501
 
@@ -241,7 +258,7 @@ Median, 25th percentile, 75th percentile, 2.5th percentile, 97.5th percentile, m
 
 ---
 
-## 8. Session Log
+## 9. Session Log
 
 ### July 23, 2026 — Session 1
 
@@ -293,10 +310,18 @@ Median, 25th percentile, 75th percentile, 2.5th percentile, 97.5th percentile, m
     - Refactored the existing Figures 1–3 / summary table / per-bucket detail code out of the old monolithic run block into a shared `render_results()` function used by both modes, to avoid duplicating ~150 lines
     - Added a new "Chance Imbalance Between Arms" section (Randomized mode only): a combined or per-bucket imbalance metric (selectable, including the `>50` bucket specifically), a "% counter-intuitive replicates" statistic, a scatter plot of imbalance vs. observed VE, and a diagnostic table listing exact per-bucket breakdowns for flagged replicates
     - "Counter-intuitive" is defined as: whether a replicate shows a detectable effect (VE > ε, ε adjustable) disagrees with what the true V implies (V > 0 should show an effect; V = 0 should not) — one rule that covers both the "vaccine works but trial shows nothing" and "no effect but trial shows one" failure modes from the same run
-- **Verified the new logic directly in Python** (bypassing the UI, which hit the small-N crash described in §7): at N=25/25 with true V=0.3, 30.3% of replicates were counter-intuitive; at N=500/500, only 3.6% were — confirming chance imbalance shrinks with N as expected. Arm sizes were always exact across all replicates.
-- Discovered the pre-existing small-N crash bug in `Vaccinated N_vax` while testing (see §7, Known Issues) — confirmed unrelated to this session's changes (reproduces identically in the old Manual mode) and left unfixed pending a decision on priority
+- **Verified the new logic directly in Python** (bypassing the UI, which hit the small-N crash described in §8): at N=25/25 with true V=0.3, 30.3% of replicates were counter-intuitive; at N=500/500, only 3.6% were — confirming chance imbalance shrinks with N as expected. Arm sizes were always exact across all replicates.
+- Discovered the pre-existing small-N crash bug in `Vaccinated N_vax` while testing (see §8, Known Issues) — confirmed unrelated to this session's changes (reproduces identically in the old Manual mode) and left unfixed pending a decision on priority
 - Did not get a live browser confirmation that "Run Simulation" renders the new section end-to-end in Randomized mode — repeated automated-browser click attempts failed, but a control test showed the *same, pre-existing* Run button also fails to trigger via automation in Manual mode, indicating a session-specific browser-automation limitation rather than a bug in the new code
+- Committed and pushed the new mode to GitHub
+
+### July 28, 2026 — Session 5
+
+- Ran the new Randomized Single Population mode for the first time in the actual (not just Python-tested) app
+- Flagged the ε detection-threshold parameter as not obviously well-motivated — recorded as an open question in §7, "Detection threshold ε — open question," rather than resolved on the spot
+- Noted an important modeling insight from exploring the app: in high-prevalence settings (`p_ci` high), it's easy to see no apparent vaccine effect at the trial level even with a real 30% per-contact efficacy, due to a ceiling effect in the per-period infection probability formula — recorded in §7, "High-prevalence 'ceiling effect' can mask real per-contact efficacy"
+- Added new notebook section "§7. Modeling Insights & Open Questions" to hold observations like these going forward, separate from the "Known Issues" bug log (renumbered to §8) and Session Log (renumbered to §9)
 
 ---
 
-*Add a new dated entry under Section 8 at the start of each session.*
+*Add a new dated entry under Section 9 at the start of each session.*
